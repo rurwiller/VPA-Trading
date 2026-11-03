@@ -1,0 +1,10 @@
+# Kronos runtime deps (upstream pins relaxed so they install on Python 3.12+/3.13).
+# For a CPU-only torch wheel: pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
+numpy
+pandas>=2.2
+einops>=0.8.1
+huggingface_hub>=0.33.1,<1.0
+safetensors>=0.6.2
+tqdm
+matplotlib
