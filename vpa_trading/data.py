@@ -1,0 +1,46 @@
+"""US stock bars from Yahoo Finance's chart API (free, unofficial, can lag).
+
+Timestamps come back as tz-naive New York time, regular session only.
+"""
+from __future__ import annotations
+
+import gzip
+import json
+import urllib.request
+from pathlib import Path
+
+import pandas as pd
+
+YAHOO = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range={rng}&interval={iv}&includePrePost=false"
+
+
+def parse_yahoo_chart(payload: dict) -> pd.DataFrame:
+    r = payload["chart"]["result"][0]
+    q = r["indicators"]["quote"][0]
+    tz = r["meta"].get("exchangeTimezoneName", "America/New_York")
+    ts = pd.to_datetime(r["timestamp"], unit="s", utc=True).tz_convert(tz).tz_localize(None)
+    df = pd.DataFrame({k: q[k] for k in ["open", "high", "low", "close", "volume"]}, index=ts)
+    df.index.name = "timestamps"
+    df = df.dropna()
+    # Yahoo appends a live, still-forming tick whose time is not on the bar grid.
+    step = df.index.to_series().diff().mode().iloc[0]
+    on_grid = (df.index - df.index.normalize()) % step == pd.Timedelta(0)
+    df = df[on_grid]
+    t = df.index.time
+    df = df[(t >= pd.Timestamp("09:30").time()) & (t < pd.Timestamp("16:00").time())]
+    return df[~df.index.duplicated(keep="last")].astype(float)
+
+
+def load_yahoo_file(path: str | Path) -> pd.DataFrame:
+    p = Path(path)
+    opener = gzip.open if p.suffix == ".gz" else open
+    with opener(p, "rt") as f:
+        return parse_yahoo_chart(json.load(f))
+
+
+def fetch_yahoo(symbol: str, interval: str = "5m", rng: str = "60d", timeout: float = 20) -> pd.DataFrame:
+    """Yahoo serves 5m bars for the last 60 days, 1h for ~2 years, 1d for decades."""
+    req = urllib.request.Request(YAHOO.format(sym=symbol, rng=rng, iv=interval),
+                                 headers={"User-Agent": "Mozilla/5.0 (vpa-trading)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return parse_yahoo_chart(json.load(resp))
