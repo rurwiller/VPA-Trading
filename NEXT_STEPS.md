@@ -1,0 +1,62 @@
+# Where this left off (2026-11-03)
+
+Goal: a tool that helps with better entries on **US stocks, day trading**, using
+TradingView as the chart, Kronos forecasts and the user's own
+**Willard 3.0 Hybrid Oscillator**. The user's chart is in **MST** (New York time
+minus 2 hours; the open is 7:30 MST).
+
+## What exists
+
+- `vpa_trading/kronos_loader.py`: loads Kronos-small + tokenizer from Hugging Face.
+- `vpa_trading/kronos_paths.py`: sample many Kronos paths, race them to stop/target,
+  random-walk baseline, p10/p50/p90 cone.
+- `vpa_trading/willard_osc.py`: Python port of the oscillator core (Pine `f_hybrid`).
+- `vpa_trading/data.py`: Yahoo loader, session resampling (15m, 30m, 1h bins start 9:30).
+- `scripts/kronos_backtest.py`: entry rules `time` (10:15), `rsi`, `osc`
+  (`--osc-mode flip|touch`, `--trend-ema`), Kronos optional (`--paths 0` = rule only,
+  runs in seconds). Resumable: finished decisions in the CSV are skipped.
+- `scripts/kronos_report.py`: pools result CSVs across tickers.
+- `results/`: CSVs from every run below.
+
+## Findings so far (60 days of 5m bars, Aug-Nov 2026)
+
+| Test | Result |
+|---|---|
+| Kronos, 5m bars, TSLA, 15 days | forecasts biased down; p10-p90 band held the real close only 33-40% of days; not better than a constant guess |
+| Kronos, 15m bars, TSLA 10:15 rule, 50 days | band coverage 76% (much better), but hit-rate calls still worse than a constant guess (Brier 0.165 vs 0.120); filter -0.07R vs -0.10R, within noise |
+| Oscillator 15m flip at 12/88, 7 tickers, no Kronos | 1,168 trades, 58% win, -0.03 +/- 0.04 R after 2 bps costs |
+| Same, touch | -0.01 +/- 0.05 R |
+| Same, with-trend only (EMA20/50) | -0.03 +/- 0.05 R |
+
+Nothing so far shows an edge after costs. None of it is a verdict on the user's full
+multi-timeframe setup, which has not been tested yet.
+
+## Known data problem: Yahoo volume spikes
+
+Yahoo's 5m bars contain bogus volume prints (23 of 4,680 TSLA bars at 8-110x the
+local median; e.g. 20M shares at 15:35 ET on 2026-11-03). They distort the
+oscillator's VWAP z-score (weight 6 of 9.5). Capping volume at 8x the 25-bar median
+made the port match the user's TradingView value on that bar (43.1 vs chart 44.49;
+uncapped 65.8). The oscillator results above used **uncapped** Yahoo volume, so they
+should be re-run on clean data.
+
+## Next steps (new session with Alpaca keys)
+
+1. Check `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` against the paper account.
+2. Add an Alpaca bars loader (`/v2/stocks/{sym}/bars`, `feed=sip`; the free plan can
+   read SIP history older than 15 minutes). Pull at least a year of **1-minute** bars
+   for TSLA, SPY, QQQ, AAPL, NVDA, AMD, META. Compare volume with Yahoo's.
+3. Re-run the oscillator rules on Alpaca data (more history, clean volume).
+4. Build the **multi-timeframe oscillator rule** the user asked for: enter when the
+   oscillator on several timeframes is at an extreme together, e.g. 1h and 5m both
+   elevated -> short, both low -> long. Higher timeframes must use **closed** bars only
+   (the indicator's "Confirmed" mode). Options: timeframes and touch levels
+   (indicator defaults: 5m 5, 9m 10, 15m 12, 1m 3), alignment window, trigger =
+   immediate or a flip on the fastest timeframe. Then add the 3m/1m trigger.
+5. Run Kronos as a filter only on whatever rule shows a real edge (Kronos is slow:
+   about 25-70 s per decision on this CPU).
+6. Then build the entry screen: chart with the cone and race, paper orders on Alpaca
+   with protective orders that do not expire.
+
+Ask the user for: their indicator settings if changed from defaults, and a few
+oscillator values from the TradingView Data Window to keep checking the port.
