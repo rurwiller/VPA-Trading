@@ -44,3 +44,17 @@ def fetch_yahoo(symbol: str, interval: str = "5m", rng: str = "60d", timeout: fl
                                  headers={"User-Agent": "Mozilla/5.0 (vpa-trading)"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return parse_yahoo_chart(json.load(resp))
+
+
+def resample_bars(df: pd.DataFrame, interval: str) -> pd.DataFrame:
+    """Aggregate session bars to a coarser size (e.g. 5m -> 15m), one session at a time.
+
+    Bins are anchored at midnight, so 15m/30m/1h bins start at 9:30, 9:45 ... as on a chart
+    (1h bins would start at 9:00, not 9:30 as on a chart, so prefer 15m or 30m).
+    A partial last bin (an incomplete or early-closed session) is kept.
+    """
+    rule = interval.replace("m", "min") if interval.endswith("m") else interval
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    out = df.groupby(df.index.date, group_keys=False).apply(lambda d: d.resample(rule).agg(agg))
+    out.index.name = "timestamps"
+    return out.dropna()
