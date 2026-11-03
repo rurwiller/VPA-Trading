@@ -120,7 +120,7 @@ def run(df: pd.DataFrame, args) -> pd.DataFrame:
     return pd.read_csv(out)
 
 
-def osc_decisions(o: pd.Series, bar: pd.Timedelta, lo, hi, args):
+def osc_decisions(o: pd.Series, bar: pd.Timedelta, lo, hi, args, close=None):
     """Willard oscillator extremes, read on closed bars (both sides).
 
     touch: the bar the oscillator first closes at/below L (long) or at/above 100-L (short).
@@ -137,6 +137,10 @@ def osc_decisions(o: pd.Series, bar: pd.Timedelta, lo, hi, args):
         w = args.osc_within
         long_sig = (o > o.shift()) & (o.shift() <= o.shift(2)) & (o.shift().rolling(w).min() <= L)
         short_sig = (o < o.shift()) & (o.shift() >= o.shift(2)) & (o.shift().rolling(w).max() >= H)
+    if args.trend_ema:  # with-trend only: longs above the EMA, shorts below it
+        ema = close.ewm(span=args.trend_ema, adjust=False).mean()
+        long_sig &= close > ema
+        short_sig &= close < ema
     last = {"long": None, "short": None}
     for t in o.index[long_sig | short_sig]:
         t_dec = t + bar
@@ -166,7 +170,7 @@ def decisions(df: pd.DataFrame, rsi_s: pd.Series, osc_s, bar: pd.Timedelta, args
         return
     lo, hi = pd.Timestamp(args.window[0]).time(), pd.Timestamp(args.window[1]).time()
     if args.entry == "osc":
-        yield from osc_decisions(osc_s, bar, lo, hi, args)
+        yield from osc_decisions(osc_s, bar, lo, hi, args, df.close)
         return
     # rsi: first close of the day that crosses below the entry level, long only,
     # inside the entry window. One trade per day, flat at the close.
@@ -253,6 +257,7 @@ def main() -> None:
     ap.add_argument("--osc-mode", choices=["touch", "flip"], default="flip")
     ap.add_argument("--osc-within", type=int, default=3, help="flip: bars since the zone visit")
     ap.add_argument("--osc-exit", type=float, default=50, help="rule exit: long at osc >= X, short at <= 100-X")
+    ap.add_argument("--trend-ema", type=int, default=0, help="entry=osc: only trade with the trend vs this EMA (0 = off)")
     ap.add_argument("--cooldown", type=int, default=4, help="bars between same-side signals (entry=osc)")
     ap.add_argument("--window", nargs=2, default=["09:45", "15:30"], help="entry window (entry=rsi)")
     ap.add_argument("--lookback", type=int, default=256, help="bars of context (<=512)")
@@ -273,7 +278,7 @@ def main() -> None:
     name = args.symbol or Path(args.file).name.split(".")[0]
     samp = "" if (args.top_p, args.temperature) == (0.9, 1.0) else f"_p{args.top_p}_T{args.temperature}"
     rule = {"time": args.at.replace(":", ""), "rsi": f"rsi{args.rsi_len}-{args.rsi_entry:g}-{args.rsi_exit:g}",
-            "osc": f"osc-{args.osc_mode}{args.osc_level:g}"}[args.entry]
+            "osc": f"osc-{args.osc_mode}{args.osc_level:g}" + (f"-ema{args.trend_ema}" if args.trend_ema else "")}[args.entry]
     rule += "" if args.paths else "_nokronos"
     iv = "" if args.interval == "5m" else f"_{args.interval}"
     args.out = args.out or f"results/{name}{iv}_{rule}_k{args.k}_rr{args.rr}{samp}.csv"
