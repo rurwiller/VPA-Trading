@@ -18,5 +18,6 @@ a = ap.parse_args()
 frames = [pd.read_csv(p).assign(ticker=Path(p).name.split("-")[0]) for p in a.csv]
 res = pd.concat(frames, ignore_index=True)
 res["decision_time"] = res.ticker + " " + res.decision_time
-print("tickers:", ", ".join(f"{t} ({n // 2} days)" for t, n in res.ticker.value_counts().sort_index().items()))
+days = res.assign(d=pd.to_datetime(res.decision_time.str[-19:]).dt.date).groupby("ticker").d.nunique()
+print("tickers:", ", ".join(f"{t} ({n} days)" for t, n in days.items()))
 report(res, a.threshold)
