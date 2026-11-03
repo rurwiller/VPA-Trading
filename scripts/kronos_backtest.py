@@ -72,7 +72,7 @@ def run(df: pd.DataFrame, args) -> pd.DataFrame:
             predictor = load_kronos_small(device=args.device, max_context=args.lookback)
         t0 = time.time()
         paths = kp.sample_paths(predictor, x, x.index.to_series(), fut.index.to_series(),
-                                n_paths=args.paths, seed=args.seed)
+                                n_paths=args.paths, T=args.temperature, top_p=args.top_p, seed=args.seed)
         secs = time.time() - t0
         cone = kp.cone(paths, fut.index.to_series())
         real_close = float(fut.close.iloc[-1])
@@ -138,6 +138,8 @@ def main() -> None:
     ap.add_argument("--rr", type=float, default=2.0, help="target as a multiple of risk")
     ap.add_argument("--cost-bps", type=float, default=2.0, help="round-trip fees+slippage, bps of price")
     ap.add_argument("--threshold", type=float, default=0.5)
+    ap.add_argument("--top-p", type=float, default=0.9, help="nucleus sampling; <1 trims tail moves")
+    ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--device")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out", help="results CSV (default results/<name>.csv)")
@@ -146,7 +148,8 @@ def main() -> None:
     args = ap.parse_args()
 
     name = args.symbol or Path(args.file).name.split(".")[0]
-    args.out = args.out or f"results/{name}_{args.at.replace(':', '')}_k{args.k}_rr{args.rr}.csv"
+    samp = "" if (args.top_p, args.temperature) == (0.9, 1.0) else f"_p{args.top_p}_T{args.temperature}"
+    args.out = args.out or f"results/{name}_{args.at.replace(':', '')}_k{args.k}_rr{args.rr}{samp}.csv"
     Path(args.out).parent.mkdir(exist_ok=True)
     if args.report_only:
         report(pd.read_csv(args.out), args.threshold)
