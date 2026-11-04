@@ -6,7 +6,8 @@ On each gapper stock-day (1m regular session):
   ORB-range  same entry, stop beyond the first 5-minute candle's low / high, hold to the close
   gap-go / gap-fade   at 9:35 trade with / against the opening gap, 10% ATR stop, hold to the close
   star_break your pivot shooting star / hammer on 5m / 9m / 15m (above the 2 prior highs), entered when price breaks
-             its low / high within 2 candles; 10:00-15:30 ET; exits +0.3%/-0.5% and structure (beyond the wick, 2R)
+             its low / high within 2 candles; 10:00-15:30 ET; exits +0.3%/-0.5% and structure (beyond the wick, 2R);
+             also a market fill at the close of the break minute (same stop level, 2R from the new entry)
   random     random minute 10:00-15:30 and direction, same exits as star_break (structure uses a 0.5% stop)
 Context: is the signal at an unfilled DAILY fair value gap on its side (from prior days' daily bars)?
 Costs (gappers have wider spreads): 2 cents / price + 2 bps per round trip.
@@ -146,6 +147,14 @@ def run() -> pd.DataFrame:
                         o2, p2 = race(H, L, C, q - 1, d, e, e - d * risk, e + d * 2 * risk, last)
                         rows.append(dict(r, out=o1, pct=p1, exit_kind="T0.3/S0.5"))
                         rows.append(dict(r, out=o2, pct=p2, exit_kind="struct 2R", stop_pct=risk / e * 100))
+                        # realistic worst case: market order filled at the close of the break minute, same stop level
+                        e2 = C[q]
+                        stop_lv = e - d * risk
+                        risk2 = (e2 - stop_lv) * d
+                        if risk2 > 0.0005 * e2:
+                            o3, p3 = race(H, L, C, q, d, e2, stop_lv, e2 + d * 2 * risk2, last)
+                            rows.append(dict(r, entry=e2, out=o3, pct=p3, exit_kind="struct 2R, market fill",
+                                             stop_pct=risk2 / e2 * 100))
         # random baseline: 3 random entries per day
         ok = np.flatnonzero((mins >= 30) & (mins <= 359))
         for q in rng.choice(ok, size=min(3, len(ok)), replace=False):
