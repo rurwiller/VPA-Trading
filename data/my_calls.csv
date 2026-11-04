@@ -3,3 +3,5 @@ date,time_mst,symbol,tf,side,note
 2026-11-04,09:25,TSLA,5m,long,pivot low after the 09:20 drop
 2026-11-04,,QQQ,,short,PUT from the oscillator near the 695 supply zone (from screenshot; time and tf not recorded)
 2026-11-04,,QQQ,,long,CALL from the oscillator after the Ready Call near 692 (from screenshot; time and tf not recorded)
+2026-11-04,10:57,TSLA,9m,short,pivot high with upper wick; better than the scanner's 11:25 / 11:51 shorts
+2026-11-04,12:09,TSLA,9m,short,pivot high (day high 391.99); better than the scanner's 11:25 / 11:51 shorts

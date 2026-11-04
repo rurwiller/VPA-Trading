@@ -120,6 +120,9 @@ class Config:
     max_notional: float = 100_000.0  # never more than this much stock per position (tight stops would oversize)
     target: str = "0.3%"            # "0.3%" style percent, or k x the stop distance like "1R" / "2R"
     require_gap: bool = True
+    require_pivot: bool = True      # the signal candle's wick must be the extreme of the last `pivot_bars` candles
+    pivot_bars: int = 12
+    long_min_rvol: float = 3.0      # bullish signals only on extremely high volume (time-of-day relative volume)
     short_trend_filter: bool = True  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
@@ -179,6 +182,17 @@ class Engine:
                 det = vpa.detect(done, done.atr)
                 for _, r in det[(det.index == t) & det.type.isin(PREMIER_TYPES)].iterrows():
                     found.append(("premier", r.type, int(r.bias)))
+                # the user's pivot candle: a clear rejection wick (>= 40% of the range and at least the body),
+                # small opposite wick. Hammer-shaped candles are no longer traded as shorts (HANGING_MAN).
+                o_, h_, l_, c_ = (float(done[k].iat[-1]) for k in ("open", "high", "low", "close"))
+                rng = h_ - l_
+                if rng > 0:
+                    up, dn, body = h_ - max(o_, c_), min(o_, c_) - l_, abs(c_ - o_)
+                    if up >= 0.4 * rng and up >= body and dn <= 0.3 * rng and not any(b < 0 for _, _, b in found):
+                        found.append(("premier", "PIVOT_WICK_TOP", -1))
+                    if dn >= 0.4 * rng and dn >= body and up <= 0.3 * rng and not any(b > 0 for _, _, b in found):
+                        found.append(("premier", "PIVOT_WICK_BOTTOM", 1))
+                found = [f for f in found if f[1] != "HANGING_MAN"]
             if "climax" in self.cfg.families:
                 cl = climaxes(done)
                 for _, r in cl[cl.index == t].iterrows():
@@ -192,6 +206,14 @@ class Engine:
                 wick = max(hi, float(done.high.iloc[-3:].max())) if (fam == "climax" and bias < 0) else hi
                 if bias > 0:
                     wick = min(lo, float(done.low.iloc[-3:].min())) if fam == "climax" else lo
+                if self.cfg.require_pivot:
+                    n = self.cfg.pivot_bars
+                    if (bias < 0 and wick < float(done.high.iloc[-n:].max())) or (bias > 0 and wick > float(done.low.iloc[-n:].min())):
+                        continue        # not the top / bottom of the move: no pivot
+                if bias > 0 and self.cfg.long_min_rvol > 0:
+                    rv = float(vpa.relvol_tod(done).iat[-1])
+                    if not rv >= self.cfg.long_min_rvol:
+                        continue        # bullish only on extremely high volume
                 if gaps is None:
                     gaps = self._gaps(sym, m1, now)
                 gap = self._at_gap(gaps, wick, bias, a5)
@@ -205,7 +227,7 @@ class Engine:
                 p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap)
                 if p:
                     out.append(p)
-        return out
+        return out[:1]          # one order per symbol: the same candle can count as two signal types
 
     @staticmethod
     def _uptrend(m1: pd.DataFrame, b5: pd.DataFrame, now: pd.Timestamp) -> str:
@@ -300,6 +322,23 @@ class Engine:
                 "take_profit": {"limit_price": f"{p.target:.2f}"}, "stop_loss": {"stop_price": f"{p.stop:.2f}"},
                 "client_order_id": f"vpa-{p.sym}-{p.tf}-{p.signal_close:%Y%m%d%H%M}"}
         r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
+        if not r.ok and "stop price must be" in r.text:
+            # price is already through the trigger: enter at market if it is still within half the stop distance
+            try:
+                mp = float(r.json().get("market_price"))
+            except (TypeError, ValueError):
+                mp = float("nan")
+            risk = abs(p.entry - p.stop)
+            past = (p.entry - mp) * (-p.side)          # how far price went beyond the trigger in the trade's direction
+            if mp == mp and 0 <= past <= 0.5 * risk:
+                body.pop("stop_price")
+                body["type"] = "market"
+                body["client_order_id"] += "-mkt"
+                r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
+                p.extra["market_fallback"] = mp
+            else:
+                p.status, p.exit_reason = "cancelled", f"price {mp} already {past:.2f} past the trigger (> half the stop distance)"
+                return
         if r.ok:
             p.order_id, p.status = r.json()["id"], "submitted"
         else:

@@ -34,7 +34,7 @@ from midcap_test import MAG, MID, cost_bps  # noqa: E402
 
 OUT = Path("results/pivot_relax")
 SPLIT = pd.Timestamp("2024-11-01")
-TFS = ("2m", "5m", "9m", "15m")
+TFS = ("2m", "5m", "9m", "15m")   # the report also splits out 5m/9m/15m
 PREMIER_TYPES = {"SHOOTING_STAR", "SHOOTING_STAR_IN_DOWNTREND", "HAMMER", "HANGING_MAN", "HANGING_MAN_SHOOTING_STAR"}
 FLAT_MIN = 380    # 15:50 ET = 380 minutes after 9:30
 
@@ -56,12 +56,19 @@ def candidates(b: pd.DataFrame) -> pd.DataFrame:
     c = vpa.context(b, b.atr)
     det = vpa.detect(b, b.atr)
     det = det[det.type.isin(PREMIER_TYPES)]
+    rng = (b.high - b.low).replace(0, np.nan)
+    top, bot = b[["open", "close"]].max(axis=1), b[["open", "close"]].min(axis=1)
+    body, upw, low_w = (b.close - b.open).abs(), b.high - top, bot - b.low
+    user_top = (upw >= 0.4 * rng) & (upw >= body) & (low_w <= 0.3 * rng)
+    user_bot = (low_w >= 0.4 * rng) & (low_w >= body) & (upw <= 0.3 * rng)
+    rv = vpa.relvol_tod(b)
     parts = []
     for d, strict, relaxed, ext, ctx in ((-1, sh["star"], sh["star_r"], b.high, (c.trend == 1) | c.near_high),
                                          (1, sh["ham"], sh["ham_r"], b.low, (c.trend == -1) | c.near_low)):
         piv = {n: (ext >= ext.rolling(n).max()) if d < 0 else (ext <= ext.rolling(n).min()) for n in (6, 12)}
         flags = pd.DataFrame({"A": b.index.isin(det.index[det.bias == d]),
-                              "B": strict & piv[12], "C": relaxed & piv[12], "D": relaxed & piv[6], "E": relaxed & ctx}, index=b.index)
+                              "B": strict & piv[12], "C": relaxed & piv[12], "D": relaxed & piv[6], "E": relaxed & ctx,
+                              "U": (user_top if d < 0 else user_bot & (rv >= 3.0)) & piv[12]}, index=b.index)
         flags = flags[flags.any(axis=1)]
         flags["dir"], flags["ext"] = d, ext.reindex(flags.index)
         flags["hi"], flags["lo"] = b.high.reindex(flags.index), b.low.reindex(flags.index)
@@ -173,7 +180,7 @@ def table(ev: pd.DataFrame, rows: list[tuple[str, pd.Series]]) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-NAMES = {"A": "A live rules", "B": "B strict + pivot12", "C": "C relaxed + pivot12", "D": "D relaxed + pivot6", "E": "E relaxed + context"}
+NAMES = {"U": "U new pivot rules (longs need rvol >= 3)", "A": "A live rules", "B": "B strict + pivot12", "C": "C relaxed + pivot12", "D": "D relaxed + pivot6", "E": "E relaxed + context"}
 
 
 def report() -> None:
@@ -189,9 +196,9 @@ def report() -> None:
         u = ev[ev.universe == uni]
         for gap_name, gm in (("at a 1h/4h/D gap (as live)", u.at_gap), ("no gap required", u.at_gap | ~u.at_gap)):
             for side, sm in (("short", u.dir < 0), ("long", u.dir > 0)):
-                rows = [(NAMES[v], u[v] & gm & sm) for v in "ABCDE"]
+                rows = [(NAMES[v], u[v] & gm & sm) for v in "UABCDE"]
                 if side == "short":
-                    rows += [(NAMES[v] + " + trend filter", u[v] & gm & sm & u.trend_ok) for v in "ABCDE"]
+                    rows += [(NAMES[v] + " + trend filter", u[v] & gm & sm & u.trend_ok) for v in "UABCDE"]
                 L.append(f"\n## {uni}: {side}s, {gap_name}\n")
                 L.append(table(u, rows).to_markdown(index=False))
     Path("reports/pivot_relax.md").write_text("\n".join(L) + "\n")
