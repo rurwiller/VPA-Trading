@@ -1,0 +1,5 @@
+date,time_mst,symbol,tf,side,note
+2026-11-04,08:40,TSLA,5m,short,pivot high: long upper wick 5m candle
+2026-11-04,09:25,TSLA,5m,long,pivot low after the 09:20 drop
+2026-11-04,,QQQ,,short,PUT from the oscillator near the 695 supply zone (from screenshot; time and tf not recorded)
+2026-11-04,,QQQ,,long,CALL from the oscillator after the Ready Call near 692 (from screenshot; time and tf not recorded)
