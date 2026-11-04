@@ -120,6 +120,7 @@ class Config:
     max_notional: float = 100_000.0  # never more than this much stock per position (tight stops would oversize)
     target: str = "0.3%"            # "0.3%" style percent, or k x the stop distance like "1R" / "2R"
     require_gap: bool = True
+    short_trend_filter: bool = True  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
 
@@ -195,10 +196,27 @@ class Engine:
                 gap = self._at_gap(gaps, wick, bias, a5)
                 if self.cfg.require_gap and gap == "-":
                     continue
+                if bias < 0 and self.cfg.short_trend_filter:
+                    why = self._uptrend(m1, b5, now)
+                    if why:
+                        print(f"[{(now - pd.Timedelta(hours=2)).strftime('%H:%M')} MST] {sym} {tf} {typ} short skipped: {why}", flush=True)
+                        continue
                 p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap)
                 if p:
                     out.append(p)
         return out
+
+    @staticmethod
+    def _uptrend(m1: pd.DataFrame, b5: pd.DataFrame, now: pd.Timestamp) -> str:
+        """Reason a short should be skipped (price above VWAP, or 5m EMA9 above EMA21), else ''."""
+        px, vw = float(m1.close.iloc[-1]), float(ind.session_vwap(m1).iloc[-1])
+        c = b5[b5.closes_at <= now].close
+        e9, e21 = float(c.ewm(span=9, adjust=False).mean().iloc[-1]), float(c.ewm(span=21, adjust=False).mean().iloc[-1])
+        if px > vw:
+            return f"price {px:.2f} above VWAP {vw:.2f}"
+        if e9 > e21:
+            return f"5m EMA9 {e9:.2f} above EMA21 {e21:.2f}"
+        return ""
 
     def _gaps(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> dict:
         g = {"1h": live_gaps(frame(m1, "60m"), m1, GAP_SESSIONS["1h"], now),

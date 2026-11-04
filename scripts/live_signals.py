@@ -10,6 +10,7 @@
 Options: --tfs 2m 5m 9m 15m   --families premier climax   --target 0.3% | 1R | 2R (R = the candle-based stop distance)   --risk <dollars per trade>
          --max-notional <max dollars of stock per position, default 100000>
          --no-gap (do not require a 1h/4h/D gap)
+         --no-trend-filter (shorts are skipped by default when price is above session VWAP or the 5m EMA9 is above EMA21)
 Every signal, order, fill and exit is appended to logs/live/<date>.jsonl; a summary prints at the end of the day.
 """
 from __future__ import annotations
@@ -120,12 +121,13 @@ def main() -> None:
     ap.add_argument("--max-notional", type=float, default=100_000.0, help="max dollars of stock per position")
     ap.add_argument("--target", default="0.3%", help="0.3%% style percent from the entry, or a multiple of the stop distance like 1R / 2R")
     ap.add_argument("--no-gap", action="store_true", help="do not require a 1h/4h/D fair value gap")
+    ap.add_argument("--no-trend-filter", action="store_true", help="allow shorts even when price is above VWAP or 5m EMA9 > EMA21")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
     ap.add_argument("--flatten", action="store_true", help="cancel all paper orders, close all positions, print today's log")
     a = ap.parse_args()
     cfg = LV.Config(symbols=[s.upper() for s in a.symbols], tfs=tuple(a.tfs), families=tuple(a.families),
-                    risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap)
+                    risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap, short_trend_filter=not a.no_trend_filter)
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:
