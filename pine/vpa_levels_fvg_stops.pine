@@ -1,0 +1,238 @@
+//@version=6
+// VPA Levels, FVGs & Stops
+// Draws: fair value gaps (this chart's timeframe + chosen higher timeframes, confirmed bars only),
+// prior-day high/low/close, premarket high/low, 15/30-minute opening range, session VWAP,
+// EMA 9/21, a 1.5 x ATR(5m) stop for a long and a short from the current price, and
+// Coulling premier candles (shooting star / hammer) graded by relative volume.
+// Times are New York exchange time, so it works the same on a chart set to MST.
+// Premarket levels need "Extended trading hours" switched on for the chart.
+indicator("VPA Levels, FVGs & Stops", overlay = true, max_boxes_count = 500, max_lines_count = 100, max_labels_count = 200)
+
+// ---------------------------------------------------------------- inputs
+grpF = "Fair value gaps"
+showFvgChart = input.bool(true, "FVGs on chart timeframe", group = grpF)
+showFvgH1 = input.bool(true, "FVGs from higher timeframe 1", inline = "h1", group = grpF)
+htf1 = input.timeframe("15", "", inline = "h1", group = grpF)
+showFvgH2 = input.bool(true, "FVGs from higher timeframe 2", inline = "h2", group = grpF)
+htf2 = input.timeframe("60", "", inline = "h2", group = grpF)
+minGapAtr = input.float(0.1, "Minimum gap size (x ATR of that timeframe)", step = 0.05, group = grpF)
+maxGaps = input.int(15, "Max open gaps kept per timeframe", minval = 1, maxval = 100, group = grpF)
+deleteFilled = input.bool(true, "Remove gaps once fully filled", group = grpF)
+
+grpL = "Key levels"
+showPD = input.bool(true, "Prior day high / low / close", group = grpL)
+showPM = input.bool(true, "Premarket high / low (needs extended hours)", group = grpL)
+showOR15 = input.bool(true, "15-minute opening range", group = grpL)
+showOR30 = input.bool(false, "30-minute opening range", group = grpL)
+showVwap = input.bool(true, "Session VWAP", group = grpL)
+showEma = input.bool(true, "EMA 9 / 21", group = grpL)
+
+grpS = "Stops"
+showStops = input.bool(true, "Show 1.5 x ATR(5m) stops from the current price", group = grpS)
+stopMult = input.float(1.5, "Stop = this many ATR(5m)", step = 0.1, group = grpS)
+
+grpV = "VPA candles (Coulling)"
+showVpa = input.bool(true, "Shooting star / hammer, graded by volume", group = grpV)
+minVolClass = input.string("AVERAGE", "Only show at or above this volume", options = ["LOW", "AVERAGE", "HIGH", "ULTRA_HIGH"], group = grpV)
+useOsc = input.bool(false, "Require the oscillator to agree", group = grpV)
+oscSrc = input.source(close, "Oscillator plot (pick Willard osc)", group = grpV)
+oscHi = input.float(80, "Oscillator elevated at or above", group = grpV)
+
+// ---------------------------------------------------------------- helpers
+atrChart = ta.atr(14)
+nyTz = "America/New_York"
+newDay = ta.change(time("D")) != 0
+
+// Keep up to `maxGaps` boxes per timeframe in arrays; dirs: 1 bull (support), -1 bear (resistance).
+manageGaps(array<box> boxes, array<int> dirs) =>
+    if barstate.isconfirmed and array.size(boxes) > 0
+        for k = array.size(boxes) - 1 to 0
+            b = array.get(boxes, k)
+            d = array.get(dirs, k)
+            filled = d == 1 ? low <= box.get_bottom(b) : high >= box.get_top(b)
+            if filled
+                if deleteFilled
+                    box.delete(b)
+                else
+                    box.set_right(b, time)
+                    box.set_extend(b, extend.none)
+                array.remove(boxes, k)
+                array.remove(dirs, k)
+
+addGap(array<box> boxes, array<int> dirs, int leftTime, float top, float bottom, int d, color c, string txt) =>
+    b = box.new(left = leftTime, top = top, right = time, bottom = bottom, xloc = xloc.bar_time, extend = extend.right,
+         border_color = color.new(c, 40), bgcolor = color.new(c, 85), text = txt, text_size = size.tiny,
+         text_color = color.new(c, 20), text_halign = text.align_right)
+    array.push(boxes, b)
+    array.push(dirs, d)
+    if array.size(boxes) > maxGaps
+        box.delete(array.shift(boxes))
+        array.shift(dirs)
+
+colBull = color.rgb(38, 166, 154)
+colBear = color.rgb(239, 83, 80)
+
+// ---------------------------------------------------------------- FVGs: chart timeframe
+var array<box> gBox0 = array.new<box>()
+var array<int> gDir0 = array.new<int>()
+if showFvgChart and barstate.isconfirmed
+    if low > high[2] and (low - high[2]) >= minGapAtr * atrChart
+        addGap(gBox0, gDir0, time[2], low, high[2], 1, colBull, "")
+    if high < low[2] and (low[2] - high) >= minGapAtr * atrChart
+        addGap(gBox0, gDir0, time[2], low[2], high, -1, colBear, "")
+manageGaps(gBox0, gDir0)
+
+// ---------------------------------------------------------------- FVGs: higher timeframes (closed bars only)
+// [1] with lookahead_on = the last CLOSED higher-timeframe bar (no repainting).
+htfGap(string tf) =>
+    request.security(syminfo.tickerid, tf, [high[3], low[1], high[1], low[3], time[3], ta.atr(14)[1]], lookahead = barmerge.lookahead_on)
+
+var array<box> gBox1 = array.new<box>()
+var array<int> gDir1 = array.new<int>()
+var array<box> gBox2 = array.new<box>()
+var array<int> gDir2 = array.new<int>()
+
+[h3a, l1a, h1a, l3a, t3a, atrA] = htfGap(htf1)
+[h3b, l1b, h1b, l3b, t3b, atrB] = htfGap(htf2)
+higherThanChart(string tf) => timeframe.in_seconds(tf) > timeframe.in_seconds(timeframe.period)
+newHtf1 = ta.change(time(htf1)) != 0
+newHtf2 = ta.change(time(htf2)) != 0
+
+if showFvgH1 and higherThanChart(htf1) and newHtf1
+    if l1a > h3a and (l1a - h3a) >= minGapAtr * atrA
+        addGap(gBox1, gDir1, t3a, l1a, h3a, 1, colBull, htf1)
+    if h1a < l3a and (l3a - h1a) >= minGapAtr * atrA
+        addGap(gBox1, gDir1, t3a, l3a, h1a, -1, colBear, htf1)
+manageGaps(gBox1, gDir1)
+
+if showFvgH2 and higherThanChart(htf2) and newHtf2
+    if l1b > h3b and (l1b - h3b) >= minGapAtr * atrB
+        addGap(gBox2, gDir2, t3b, l1b, h3b, 1, colBull, htf2)
+    if h1b < l3b and (l3b - h1b) >= minGapAtr * atrB
+        addGap(gBox2, gDir2, t3b, l3b, h1b, -1, colBear, htf2)
+manageGaps(gBox2, gDir2)
+
+// ---------------------------------------------------------------- key levels
+[pdh, pdl, pdc] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+
+var float pmh = na
+var float pml = na
+var float pmhToday = na
+var float pmlToday = na
+if newDay
+    pmh := na
+    pml := na
+if session.ispremarket
+    pmh := na(pmh) ? high : math.max(pmh, high)
+    pml := na(pml) ? low : math.min(pml, low)
+if session.ismarket
+    pmhToday := pmh
+    pmlToday := pml
+if newDay and not session.ispremarket
+    pmhToday := na
+    pmlToday := na
+
+inOR15 = not na(time(timeframe.period, "0930-0945", nyTz))
+inOR30 = not na(time(timeframe.period, "0930-1000", nyTz))
+var float orh15 = na
+var float orl15 = na
+var float orh30 = na
+var float orl30 = na
+if inOR15 and not inOR15[1]
+    orh15 := high
+    orl15 := low
+else if inOR15
+    orh15 := math.max(orh15, high)
+    orl15 := math.min(orl15, low)
+if inOR30 and not inOR30[1]
+    orh30 := high
+    orl30 := low
+else if inOR30
+    orh30 := math.max(orh30, high)
+    orl30 := math.min(orl30, low)
+reg = session.ismarket
+vwapV = ta.vwap(hlc3)
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+orDone15 = reg and not inOR15
+orDone30 = reg and not inOR30
+
+plot(showPD and reg ? pdh : na, "Prior day high", color.new(color.orange, 0), 1, plot.style_linebr)
+plot(showPD and reg ? pdl : na, "Prior day low", color.new(color.orange, 0), 1, plot.style_linebr)
+plot(showPD and reg ? pdc : na, "Prior day close", color.new(color.orange, 50), 1, plot.style_linebr)
+plot(showPM and reg ? pmhToday : na, "Premarket high", color.new(color.purple, 0), 1, plot.style_linebr)
+plot(showPM and reg ? pmlToday : na, "Premarket low", color.new(color.purple, 0), 1, plot.style_linebr)
+plot(showOR15 and orDone15 ? orh15 : na, "OR15 high", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(showOR15 and orDone15 ? orl15 : na, "OR15 low", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(showOR30 and orDone30 ? orh30 : na, "OR30 high", color.new(color.teal, 0), 1, plot.style_linebr)
+plot(showOR30 and orDone30 ? orl30 : na, "OR30 low", color.new(color.teal, 0), 1, plot.style_linebr)
+plot(showVwap and reg ? vwapV : na, "VWAP", color.new(color.yellow, 0), 2, plot.style_linebr)
+plot(showEma ? ema9 : na, "EMA 9", color.new(color.aqua, 0), 1)
+plot(showEma ? ema21 : na, "EMA 21", color.new(color.fuchsia, 0), 1)
+
+// Level labels on the last bar
+levelLabel(float y, string txt, color c, bool on) =>
+    var label lb = na
+    label.delete(lb)
+    if on and not na(y) and barstate.islast
+        lb := label.new(bar_index + 3, y, txt + " " + str.tostring(y, format.mintick), color = color(na),
+             textcolor = c, style = label.style_label_left, size = size.small)
+levelLabel(pdh, "PDH", color.orange, showPD)
+levelLabel(pdl, "PDL", color.orange, showPD)
+levelLabel(pdc, "PDC", color.new(color.orange, 40), showPD)
+levelLabel(pmhToday, "PMH", color.purple, showPM and reg)
+levelLabel(pmlToday, "PML", color.purple, showPM and reg)
+levelLabel(orh15, "ORH15", color.blue, showOR15 and orDone15)
+levelLabel(orl15, "ORL15", color.blue, showOR15 and orDone15)
+
+// ---------------------------------------------------------------- stops (1.5 x ATR of the 5-minute chart)
+atr5 = request.security(syminfo.tickerid, "5", ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+var line lLong = na
+var line lShort = na
+var label tLong = na
+var label tShort = na
+if showStops and barstate.islast and not na(atr5)
+    line.delete(lLong)
+    line.delete(lShort)
+    label.delete(tLong)
+    label.delete(tShort)
+    dist = stopMult * atr5
+    pct = dist / close * 100
+    lLong := line.new(bar_index - 10, close - dist, bar_index + 10, close - dist, color = colBull, style = line.style_dashed, width = 2)
+    lShort := line.new(bar_index - 10, close + dist, bar_index + 10, close + dist, color = colBear, style = line.style_dashed, width = 2)
+    tLong := label.new(bar_index + 10, close - dist, "Long stop " + str.tostring(close - dist, format.mintick) + " (-" + str.tostring(pct, "#.##") + "%)",
+         color = color(na), textcolor = colBull, style = label.style_label_left, size = size.small)
+    tShort := label.new(bar_index + 10, close + dist, "Short stop " + str.tostring(close + dist, format.mintick) + " (+" + str.tostring(pct, "#.##") + "%)",
+         color = color(na), textcolor = colBear, style = label.style_label_left, size = size.small)
+
+// ---------------------------------------------------------------- VPA premier candles (spec 3.1-3.3)
+rng = high - low
+body = math.abs(close - open)
+upW = high - math.max(open, close)
+loW = math.min(open, close) - low
+relVol = volume / ta.sma(volume, 20)[1]   // plain 20-bar relative volume (TradingView cannot easily do time-of-day)
+volClass = relVol >= 2.0 ? 3 : relVol >= 1.3 ? 2 : relVol >= 0.7 ? 1 : 0
+minClass = minVolClass == "ULTRA_HIGH" ? 3 : minVolClass == "HIGH" ? 2 : minVolClass == "AVERAGE" ? 1 : 0
+nearHigh = high >= ta.highest(high, 20) - 0.25 * atrChart
+nearLow = low <= ta.lowest(low, 20) + 0.25 * atrChart
+upTrend = ema9 > ema21
+starShape = rng > 0 and upW >= 2 * body and upW >= 0.5 * rng and loW <= 0.15 * rng and math.max(open, close) <= low + rng / 3
+hamShape = rng > 0 and loW >= 2 * body and loW >= 0.5 * rng and upW <= 0.15 * rng and math.min(open, close) >= high - rng / 3
+oscOkBear = not useOsc or oscSrc >= oscHi
+oscOkBull = not useOsc or oscSrc <= 100 - oscHi
+isStar = showVpa and barstate.isconfirmed and starShape and (upTrend or nearHigh) and volClass >= minClass and oscOkBear
+isHammer = showVpa and barstate.isconfirmed and hamShape and (not upTrend or nearLow) and volClass >= minClass and oscOkBull
+gradeTxt(int vc) => vc == 3 ? "ULTRA" : vc == 2 ? "HIGH" : vc == 1 ? "AVG" : "LOW"
+if isStar
+    label.new(bar_index, high, "SS\n" + gradeTxt(volClass), color = color.new(colBear, 20), textcolor = color.white,
+         style = label.style_label_down, size = size.tiny)
+if isHammer
+    label.new(bar_index, low, "H\n" + gradeTxt(volClass), color = color.new(colBull, 20), textcolor = color.white,
+         style = label.style_label_up, size = size.tiny)
+
+// ---------------------------------------------------------------- alerts
+nearLvl(float lv) => not na(lv) and math.abs(close - lv) <= 0.25 * nz(atr5, atrChart)
+atLevel = reg and (nearLvl(pdh) or nearLvl(pdl) or nearLvl(pmhToday) or nearLvl(pmlToday) or (orDone15 and (nearLvl(orh15) or nearLvl(orl15))))
+alertcondition(atLevel and not atLevel[1], "Price at a key level", "{{ticker}} is within 0.25 ATR(5m) of a key level: {{close}}")
+alertcondition(isStar, "VPA shooting star", "{{ticker}} shooting star on {{interval}} at {{close}}")
+alertcondition(isHammer, "VPA hammer", "{{ticker}} hammer on {{interval}} at {{close}}")

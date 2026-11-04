@@ -86,6 +86,34 @@ targets scaled per ticker (0.5% is far for SPY/QQQ in an hour); Coulling rules f
 user's notes (no demand / no supply, stopping volume, tests, upthrusts); levels (prior-day
 H/L, premarket H/L, opening range) as event families; the levels / FVG Pine indicator.
 
+## Round 3 (2026-11-04): Mag 7 + VPA spec + levels + limit entries -> `reports/research.md`
+
+Tickers: AAPL MSFT GOOGL AMZN NVDA META TSLA + SPY QQQ AMD, 5 years, 3.1M scored trades.
+New: `vpa_trading/vpa.py` (Coulling detectors per `docs/vpa-detection-spec.md`, Coulling naming:
+SELLING_CLIMAX = bearish top), 2m bars, key levels (prior-day H/L/C, premarket H/L, OR15/OR30),
+limit entries at FVG edges / levels, near-level / near-EMA / VPA-confirmation conditions.
+
+Findings (holdout = Nov 2024 onward):
+- 15m+9m+5m all extreme: no edge in any slice: near a level, near EMA 9/21, with a 2m/5m VPA
+  reversal signal, with a shooting star, by time of day or ADX. 15-min win rate 44-48% everywhere.
+- Shooting star / hammer / hanging man (spec shapes + context): negative at every volume grade,
+  with or without the oscillator agreeing, on 2m/5m/15m. Repeats did not help.
+- Multi-bar climaxes, stopping volume, topping out, tests: rare (~200-3,000 per period) and none
+  positive in both periods, traded either with or against Coulling's bias.
+- Levels: first touches of PDH/PDL/PDC/PMH/PML/OR are coin flips after costs, market or limit.
+- FVG: bounce > break on every timeframe, strongest on 1h, but ~0 after costs; limit entries do
+  not rescue it. (A "swept through in the touch minute" cell looked good but uses same-bar
+  information after the fill: not tradable.)
+- Stops: 90% of eventual winners stayed within 1.54-1.67 x ATR(5m) on every ticker.
+
+`pine/vpa_levels_fvg_stops.pine`: TradingView indicator (FVGs chart TF + 15m + 1h, levels, VWAP,
+EMA 9/21, 1.5 x ATR(5m) stops, Coulling shooting star / hammer with volume grade, alerts).
+Not compiled here (no TradingView access); fix any errors the user reports.
+
+Open questions for the user: their actual trade log (dates/times/entries) to test their
+discretionary filter; whether to move to longer holds (credit spreads) or a different universe
+(small-cap gappers), where intraday inefficiencies are larger.
+
 ## Known data problem: Yahoo volume spikes
 
 Yahoo's 5m bars contain bogus volume prints (23 of 4,680 TSLA bars at 8-110x the
