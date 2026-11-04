@@ -241,12 +241,21 @@ def inputs(s) -> dict:
     return x
 
 
-def run(s, x: dict, bars: pd.DataFrame | None = None, step: pd.Timedelta = pd.Timedelta(minutes=1)
-        ) -> tuple[pd.DataFrame, pd.DataFrame]:
+EXIT_DEFAULTS = dict(stop_atr=2.0, trail_act=2.25, trail_dist=1.1, tp_osc=5.0, tp_pct=0.0,
+                     mom_on=True, mom_grace=0, mom_ema=False, max_bars=0)
+
+
+def run(s, x: dict, bars: pd.DataFrame | None = None, step: pd.Timedelta = pd.Timedelta(minutes=1),
+        exits: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Bar-by-bar replay of the setup state machine and the 7 rule backtests.
     `bars` = the chart's bars (default: 1-minute); `x` must be built for the same bars."""
     m1 = s.m1 if bars is None else bars
     O, H, L, C = (m1[k].to_numpy().tolist() for k in ("open", "high", "low", "close"))
+    cfg = {**EXIT_DEFAULTS, **(exits or {})}
+    stop_atr, trail_act, trail_dist = cfg["stop_atr"], cfg["trail_act"], cfg["trail_dist"]
+    tp_osc, tp_pct, max_bars = cfg["tp_osc"], cfg["tp_pct"], cfg["max_bars"]
+    mom_on, mom_grace, mom_ema = cfg["mom_on"], cfg["mom_grace"], cfg["mom_ema"]
+    EMA = m1.close.ewm(span=9, adjust=False).mean().tolist()   # Momentum Exit "Close Beyond EMA" (9)
     X = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in x.items()}
     n = len(C)
     nan = float("nan")
@@ -338,17 +347,25 @@ def run(s, x: dict, bars: pd.DataFrame | None = None, step: pd.Timedelta = pd.Ti
             sm, sig = sims[r], sigs[r]
             if sm["dir"] != 0 and i > sm["entry_i"]:
                 d, xp, why = sm["dir"], None, ""
+                held = i - sm["entry_i"]
                 if d == 1 and L[i] <= sm["stop"]:
                     xp, why = min(O[i], sm["stop"]), "stop"
                 elif d == -1 and H[i] >= sm["stop"]:
                     xp, why = max(O[i], sm["stop"]), "stop"
-                elif (d == 1 and X["tpo"][i] >= 95) or (d == -1 and X["tpo"][i] <= 5):
+                elif tp_pct and d == 1 and H[i] >= sm["target"]:
+                    xp, why = max(O[i], sm["target"]), "tp"
+                elif tp_pct and d == -1 and L[i] <= sm["target"]:
+                    xp, why = min(O[i], sm["target"]), "tp"
+                elif tp_osc is not None and ((d == 1 and X["tpo"][i] >= 100 - tp_osc) or (d == -1 and X["tpo"][i] <= tp_osc)):
                     xp, why = C[i], "tp"
-                elif i > 0 and ((d == 1 and X["mo"][i] < X["mo_prev"][i] and C[i] < L[i - 1]) or
-                                (d == -1 and X["mo"][i] > X["mo_prev"][i] and C[i] > H[i - 1])):
+                elif mom_on and held >= mom_grace and i > 0 and (
+                        (d == 1 and X["mo"][i] < X["mo_prev"][i] and (C[i] < L[i - 1] if not mom_ema else C[i] < EMA[i])) or
+                        (d == -1 and X["mo"][i] > X["mo_prev"][i] and (C[i] > H[i - 1] if not mom_ema else C[i] > EMA[i]))):
                     xp, why = C[i], "momentum"
                 elif late or X["lastbar"][i]:
                     xp, why = C[i], "close"
+                elif max_bars and held >= max_bars:
+                    xp, why = C[i], "time"
                 elif sig == -d:
                     xp, why = C[i], "opposite"
                 if xp is not None:
@@ -357,7 +374,7 @@ def run(s, x: dict, bars: pd.DataFrame | None = None, step: pd.Timedelta = pd.Ti
                     trades.append(dict(rule=RULES[r], dir=d, entry_i=sm["entry_i"], exit_i=i, entry=e, exit=xp,
                                        reason=why, pnl=pnl, arm_i=sm["arm_i"], **sm["grade"]))
                     sm["dir"] = 0
-                else:
+                elif sm["act"] is not None:
                     if d == 1:
                         sm["best"] = max(sm["best"], H[i])
                         if sm["best"] - sm["entry"] >= sm["act"]:
@@ -372,8 +389,10 @@ def run(s, x: dict, bars: pd.DataFrame | None = None, step: pd.Timedelta = pd.Ti
                             sm["stop"] = min(sm["stop"], sm["entry"], sm["best"] + sm["dist"])
             a = X["atr"][i]
             if sm["dir"] == 0 and sig != 0 and can_enter and X["vol_ok"][i] and a == a:
-                sims[r] = dict(dir=sig, entry=C[i], entry_i=i, stop=C[i] - sig * 2.0 * a, best=C[i],
-                               act=2.25 * a, dist=1.1 * a, trail=False, arm_i=arm_bar,
+                sims[r] = dict(dir=sig, entry=C[i], entry_i=i, stop=C[i] - sig * stop_atr * a, best=C[i],
+                               target=C[i] * (1 + sig * tp_pct / 100) if tp_pct else None,
+                               act=trail_act * a if trail_act is not None else None,
+                               dist=trail_dist * a, trail=False, arm_i=arm_bar,
                                grade={f"f_{k}": v for k, v in grades[r].items()})
     t = pd.DataFrame(trades)
     if len(t):
