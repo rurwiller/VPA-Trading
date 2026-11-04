@@ -117,6 +117,7 @@ class Config:
     tfs: tuple = ("2m", "5m", "9m", "15m")
     families: tuple = ("premier", "climax")
     risk_usd: float = 50.0
+    max_notional: float = 100_000.0  # never more than this much stock per position (tight stops would oversize)
     target: str = "0.3%"            # "0.3%" style percent, or "2R"
     require_gap: bool = True
     log_dir: Path = Path("logs/live")
@@ -237,7 +238,7 @@ class Engine:
             target = round(entry + side * 2 * risk, 2)
         else:
             target = round(entry * (1 + side * float(self.cfg.target.rstrip("%")) / 100), 2)
-        qty = int(self.cfg.risk_usd // risk)
+        qty = int(min(self.cfg.risk_usd // risk, self.cfg.max_notional // entry))
         if qty < 1:
             return None
         step = pd.Timedelta(tf.replace("m", "min"))
