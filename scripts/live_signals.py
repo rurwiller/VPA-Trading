@@ -57,7 +57,7 @@ def replay(cfg: LV.Config, day: str) -> None:
 
 
 def live(cfg: LV.Config, paper: bool) -> None:
-    clock = LV._get(LV.TRADE + "/clock") if False else requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
+    clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
         return
@@ -74,6 +74,8 @@ def live(cfg: LV.Config, paper: bool) -> None:
                 LV.Engine.flatten()
             break
         today = LV.fetch_bars(cfg.symbols, boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
+        if paper:
+            eng.refresh_busy()               # never double up after a restart
         for sym in cfg.symbols:
             m = pd.concat([hist[sym][hist[sym].index.normalize() < boundary.normalize()], today.get(sym, pd.DataFrame())])
             m = m[m.index < boundary]
@@ -99,6 +101,14 @@ def live(cfg: LV.Config, paper: bool) -> None:
     s.to_csv(cfg.log_dir / f"{boundary:%Y-%m-%d}_summary.csv", index=False)
 
 
+def flatten_and_report(day: str | None) -> None:
+    """Safety net: cancel every open order, close every position, print the day's log."""
+    LV.Engine.flatten()
+    d = day or pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d")
+    p = Path("logs/live") / f"{d}.jsonl"
+    print(f"Flattened. Log {p}: " + (p.read_text() if p.exists() else "no entries today"))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbols", nargs="+", default=MAG7)
@@ -109,10 +119,13 @@ def main() -> None:
     ap.add_argument("--no-gap", action="store_true", help="do not require a 1h/4h/D fair value gap")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
+    ap.add_argument("--flatten", action="store_true", help="cancel all paper orders, close all positions, print today's log")
     a = ap.parse_args()
     cfg = LV.Config(symbols=[s.upper() for s in a.symbols], tfs=tuple(a.tfs), families=tuple(a.families),
                     risk_usd=a.risk, target=a.target, require_gap=not a.no_gap)
-    if a.replay:
+    if a.flatten:
+        flatten_and_report(None)
+    elif a.replay:
         replay(cfg, a.replay)
     else:
         live(cfg, a.paper)

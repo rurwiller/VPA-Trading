@@ -152,13 +152,15 @@ class Engine:
         self.cfg, self.history, self.daily = cfg, history, daily
         self.plans: list[Plan] = []
         self.seen: set = set()
+        self.busy: set[str] = set()          # symbols with an open position / order at Alpaca (restart safety)
 
     # ---------------------------------------------------------------- signals
     def signals(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> list[Plan]:
         """Signals whose candle closed exactly at `now` (a 1m boundary)."""
         out = []
         minute = (now - now.normalize()) / pd.Timedelta(minutes=1) - 570
-        if not 30 <= minute <= 360 or any(p.sym == sym and p.status in ("planned", "submitted", "filled") for p in self.plans):
+        if not 30 <= minute <= 360 or sym in self.busy or \
+                any(p.sym == sym and p.status in ("planned", "submitted", "filled") for p in self.plans):
             return out
         b5 = frame(m1, "5m")
         a5 = float(b5[b5.closes_at <= now].atr.iloc[-1])
@@ -302,6 +304,13 @@ class Engine:
                     why = "target" if leg.get("type") == "limit" else "stop"
                     t = pd.Timestamp(leg["filled_at"]).tz_convert("America/New_York").tz_localize(None)
                     self._close(p, float(leg["filled_avg_price"]), t, why)
+
+    def refresh_busy(self) -> None:
+        """Symbols that already have a position or a working order at Alpaca (e.g. from before a restart)."""
+        pos = requests.get(TRADE + "/positions", headers=headers(), timeout=30).json()
+        orders = requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json()
+        mine = {p.sym for p in self.plans if p.status in ("submitted", "filled")}
+        self.busy = ({x["symbol"] for x in pos} | {x["symbol"] for x in orders}) - mine
 
     @staticmethod
     def flatten() -> None:
