@@ -123,7 +123,7 @@ class Config:
     require_pivot: bool = True      # the signal candle's wick must be the extreme of the last `pivot_bars` candles
     pivot_bars: int = 12
     long_min_rvol: float = 3.0      # bullish signals only on extremely high volume (time-of-day relative volume)
-    short_trend_filter: bool = True  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
+    short_trend_filter: bool = False   # off: it blocks pivot-high shorts at the top of up-moves (user's choice 2026-11-04)  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
 
