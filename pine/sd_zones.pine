@@ -1,0 +1,199 @@
+//@version=6
+// Supply / Demand Zones (1h / 4h / D)
+// Same rules as scripts/zones_now.py and scripts/sd_zone_test.py, drawn live on any symbol:
+//   base     1-3 candles with range <= 0.7 x ATR(14) of that timeframe
+//   impulse  next candle: range >= 1.5 x ATR and body >= 60% of range, OR a gap >= 0.5 ATR, closing beyond the base
+//   zone     the base's low-to-high. Demand = impulse up, supply = impulse down. Uses CLOSED higher-timeframe candles.
+//   broken   when a candle of the zone's own timeframe closes beyond it (the zone is removed)
+//   strength impulse size (in ATR) x timeframe weight (1h 1, 4h 2, D 4) / (1 + 0.5 x retests)
+//   retests  separate visits back into the zone after it formed (counted on this chart's candles)
+// The table lists the strongest zones above (supply) and below (demand) the current price.
+indicator("Supply/Demand Zones (1h / 4h / D)", overlay = true, max_boxes_count = 500, max_labels_count = 50)
+
+grpT = "Timeframes"
+useH1 = input.bool(true, "1h zones", group = grpT)
+useH4 = input.bool(true, "4h zones", group = grpT)
+useD = input.bool(true, "Daily zones", group = grpT)
+maxPerTf = input.int(12, "Max live zones kept per timeframe", minval = 1, maxval = 60, group = grpT)
+
+grpR = "Zone rules"
+baseMax = input.float(0.7, "Base candle range <= x ATR", step = 0.05, group = grpR)
+impMin = input.float(1.5, "Impulse candle range >= x ATR", step = 0.1, group = grpR)
+bodyMin = input.float(0.6, "Impulse body >= share of range", step = 0.05, group = grpR)
+gapMin = input.float(0.5, "Or a gap >= x ATR", step = 0.1, group = grpR)
+
+grpS = "Display"
+topN = input.int(5, "Table: strongest zones per side", minval = 1, maxval = 10, group = grpS)
+highlightTop = input.bool(true, "Thicker border on the table's zones", group = grpS)
+tablePos = input.string("Top Right", "Table position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpS)
+colDemand = input.color(color.rgb(38, 166, 154), "Demand", group = grpS)
+colSupply = input.color(color.rgb(239, 83, 80), "Supply", group = grpS)
+
+// ---------------------------------------------------------------- detection on a higher timeframe
+f_zone() =>
+    float a = ta.atr(14)
+    float r = high - low
+    bool small = r <= baseMax * a
+    int k = small[1] ? (small[2] ? (small[3] ? 3 : 2) : 1) : 0
+    float bl = k == 3 ? math.min(low[1], low[2], low[3]) : k == 2 ? math.min(low[1], low[2]) : low[1]
+    float bh = k == 3 ? math.max(high[1], high[2], high[3]) : k == 2 ? math.max(high[1], high[2]) : high[1]
+    bool strong = r >= impMin * a and math.abs(close - open) >= bodyMin * r
+    bool dem = k > 0 and close > open and close > bh and (strong or open - bh >= gapMin * a)
+    bool sup = k > 0 and close < open and close < bl and (strong or bl - open >= gapMin * a)
+    int tStart = k == 3 ? time[3] : k == 2 ? time[2] : time[1]
+    [dem, sup, bl, bh, r / a, tStart, close]
+
+// [1] + lookahead_on = the last CLOSED candle of that timeframe (no repainting)
+f_closed() =>
+    [d, s, bl, bh, st, t0, c] = f_zone()
+    [d[1], s[1], bl[1], bh[1], st[1], t0[1], c[1]]
+
+[dH1, sH1, blH1, bhH1, stH1, tbH1, cH1] = request.security(syminfo.tickerid, "60", f_closed(), lookahead = barmerge.lookahead_on)
+[dH4, sH4, blH4, bhH4, stH4, tbH4, cH4] = request.security(syminfo.tickerid, "240", f_closed(), lookahead = barmerge.lookahead_on)
+[dD, sD, blD, bhD, stD, tbD, cD] = request.security(syminfo.tickerid, "D", f_closed(), lookahead = barmerge.lookahead_on)
+newH1 = ta.change(time("60")) != 0
+newH4 = ta.change(time("240")) != 0
+newD = ta.change(time("D")) != 0
+
+// ---------------------------------------------------------------- zone store
+type Zone
+    int kind      // 1 demand, -1 supply
+    float top
+    float bot
+    string tf
+    float imp
+    float w
+    int visits
+    bool inside
+    box bx
+
+var array<Zone> zs = array.new<Zone>()
+
+f_strength(Zone z) =>
+    z.imp * z.w / (1 + 0.5 * z.visits)
+
+f_add(int kind, float top, float bot, string tf, float imp, float w, int t0) =>
+    color c = kind == 1 ? colDemand : colSupply
+    box b = box.new(left = t0, top = top, right = time, bottom = bot, xloc = xloc.bar_time, extend = extend.right,
+         border_color = color.new(c, 50), bgcolor = color.new(c, 85), text = tf, text_size = size.small,
+         text_color = color.new(c, 10), text_halign = text.align_right, text_valign = text.align_top)
+    zs.push(Zone.new(kind, top, bot, tf, imp, w, 0, false, b))
+    // keep at most maxPerTf zones for this timeframe (drop the oldest)
+    int n = 0
+    for z in zs
+        if z.tf == tf
+            n += 1
+    if n > maxPerTf
+        for i = 0 to zs.size() - 1
+            Zone z = zs.get(i)
+            if z.tf == tf
+                box.delete(z.bx)
+                zs.remove(i)
+                break
+
+// remove zones of timeframe `tf` that a closed candle of that timeframe has broken
+f_break(string tf, float c) =>
+    if zs.size() > 0
+        for i = zs.size() - 1 to 0
+            Zone z = zs.get(i)
+            if z.tf == tf and ((z.kind == 1 and c < z.bot) or (z.kind == -1 and c > z.top))
+                box.delete(z.bx)
+                zs.remove(i)
+
+if barstate.isconfirmed
+    if useH1 and newH1
+        f_break("1h", cH1)
+        if dH1
+            f_add(1, bhH1, blH1, "1h", stH1, 1.0, tbH1)
+        if sH1
+            f_add(-1, bhH1, blH1, "1h", stH1, 1.0, tbH1)
+    if useH4 and newH4
+        f_break("4h", cH4)
+        if dH4
+            f_add(1, bhH4, blH4, "4h", stH4, 2.0, tbH4)
+        if sH4
+            f_add(-1, bhH4, blH4, "4h", stH4, 2.0, tbH4)
+    if useD and newD
+        f_break("D", cD)
+        if dD
+            f_add(1, bhD, blD, "D", stD, 4.0, tbD)
+        if sD
+            f_add(-1, bhD, blD, "D", stD, 4.0, tbD)
+    // count separate visits back into each zone
+    for z in zs
+        bool touching = low <= z.top and high >= z.bot
+        if touching and not z.inside
+            z.visits += 1
+        z.inside := touching
+
+// ---------------------------------------------------------------- ranking table (last bar)
+f_pos(string p) =>
+    p == "Top Left" ? position.top_left : p == "Bottom Right" ? position.bottom_right : p == "Bottom Left" ? position.bottom_left : position.top_right
+
+var table zt = table.new(f_pos(tablePos), 6, 2 * topN + 3, bgcolor = color.new(color.black, 20), border_width = 1, border_color = color.new(color.gray, 70))
+
+f_cell(int c, int r, string t, color bg, color tc) =>
+    table.cell(zt, c, r, t, text_color = tc, text_size = size.small, bgcolor = bg)
+
+if barstate.islast and zs.size() > 0
+    table.clear(zt, 0, 0, 5, 2 * topN + 2)
+    array<float> supS = array.new_float()
+    array<int> supI = array.new_int()
+    array<float> demS = array.new_float()
+    array<int> demI = array.new_int()
+    for i = 0 to zs.size() - 1
+        Zone z = zs.get(i)
+        float st = f_strength(z)
+        z.bx.set_border_width(1)
+        z.bx.set_text(z.tf + "  " + str.tostring(st, "0.0") + (z.visits == 0 ? "  fresh" : "  " + str.tostring(z.visits) + "x"))
+        // more opaque = stronger
+        int tr = int(math.max(65, 92 - st * 4))
+        z.bx.set_bgcolor(color.new(z.kind == 1 ? colDemand : colSupply, tr))
+        if z.kind == -1 and z.bot > close
+            supS.push(st)
+            supI.push(i)
+        if z.kind == 1 and z.top < close
+            demS.push(st)
+            demI.push(i)
+    array<string> hdr = array.from("Side", "TF", "Zone", "Dist %", "Strength", "Retests")
+    for c = 0 to 5
+        f_cell(c, 0, hdr.get(c), color.new(color.gray, 60), color.white)
+    int row = 1
+    for side = 0 to 1
+        array<float> S = side == 0 ? supS : demS
+        array<int> I = side == 0 ? supI : demI
+        if S.size() == 0
+            f_cell(0, row, side == 0 ? "Supply" : "Demand", na, side == 0 ? colSupply : colDemand)
+            f_cell(1, row, "none live", na, color.gray)
+            row += 1
+        else
+            array<int> ord = S.sort_indices(order.descending)
+            int nShow = math.min(topN, ord.size())
+            for k = 0 to nShow - 1
+                Zone z = zs.get(I.get(ord.get(k)))
+                float dist = side == 0 ? (z.bot - close) / close * 100 : (z.top - close) / close * 100
+                color sc = side == 0 ? colSupply : colDemand
+                f_cell(0, row, side == 0 ? "Supply" : "Demand", na, sc)
+                f_cell(1, row, z.tf, na, color.white)
+                f_cell(2, row, str.tostring(z.bot, format.mintick) + " - " + str.tostring(z.top, format.mintick), na, color.white)
+                f_cell(3, row, str.tostring(dist, "+0.00;-0.00"), na, color.white)
+                f_cell(4, row, str.tostring(f_strength(z), "0.0"), na, color.white)
+                f_cell(5, row, z.visits == 0 ? "fresh" : str.tostring(z.visits), na, color.white)
+                if highlightTop
+                    z.bx.set_border_width(3)
+                row += 1
+    table.cell(zt, 0, row, "Strength = impulse size (ATR) x TF weight (1h 1, 4h 2, D 4) / (1 + 0.5 x retests). Closed candles only; a zone is removed once its own timeframe closes through it.",
+         text_color = color.gray, text_size = size.tiny)
+    table.merge_cells(zt, 0, row, 5, row)
+
+// ---------------------------------------------------------------- alerts
+inDemand = false
+inSupply = false
+for z in zs
+    if low <= z.top and high >= z.bot
+        if z.kind == 1
+            inDemand := true
+        else
+            inSupply := true
+alertcondition(inDemand and not inDemand[1], "Price entered a demand zone", "{{ticker}} entered a demand zone at {{close}}")
+alertcondition(inSupply and not inSupply[1], "Price entered a supply zone", "{{ticker}} entered a supply zone at {{close}}")
