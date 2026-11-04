@@ -4,3 +4,4 @@ __pycache__/
 .hf_cache/
 results/
 data/alpaca/
+data/gappers/
