@@ -26,7 +26,8 @@ DEFAULT = ["TSLA", "SPY", "QQQ", "AAPL", "NVDA", "AMD", "META"]
 
 
 def prepare(sym: str, slow_iv: str, fast_iv: str, data_dir: str):
-    b1 = load_bars_file(Path(data_dir) / f"{sym}-1m.csv.gz")
+    p = Path(data_dir) / f"{sym}-1m-ext.csv.gz"
+    b1 = load_bars_file(p if p.exists() else Path(data_dir) / f"{sym}-1m.csv.gz")
     slow, fast = mtf.osc_on(b1, slow_iv), mtf.osc_on(b1, fast_iv)
     fast_close = fast.index + pd.Timedelta(fast_iv.replace("m", "min"))
     slow_at_fast = mtf.closed_value(slow, pd.DatetimeIndex(fast_close))

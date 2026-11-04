@@ -54,6 +54,38 @@ No edge after costs. The 1h+5m agreement does not rescue the oscillator as an en
 own. Untested: the 3m/1m trigger, other timeframe pairs (15m+5m, 1h+15m), exits other than
 ATR/midline, using the extreme as a *filter/avoid* signal, per-ticker results, time-of-day.
 
+## Research grid, 5 years (done 2026-11-04) -> `reports/research.md`
+
+Data: 1m SIP bars incl. extended hours, 2021-11-05..2026-11-03, 1,253 sessions x 7 tickers
+(`data/alpaca/<SYM>-1m-ext.csv.gz`, `python scripts/alpaca_pull.py --years 5 --extended`).
+Run: `python scripts/research_run.py` (~1 min) then `python scripts/research_report.py`.
+Discovery = before 2024-11-01, holdout = after. 1.6M scored trades, 4,885 discovery cells.
+
+Families: osc stacks (1h+30m+15m+5m, 1h+15m+9m+5m, 15m+9m+5m, 1h+15m+5m, 1h+5m; levels
+10-30; with/without 3m trigger), rejection candle at osc extreme, VPA climaxes, FVG touches;
+each as fade and continuation, split by ADX(14) band/slope, DI, time of day, VWAP distance,
+9/21 EMA, RVOL, nearby FVG, ticker. Exits 5/15/60 min, +0.5%/-0.3%, 2R/1.5 ATR(5m), 2 bps cost.
+
+Findings:
+- No setup is positive after costs in both periods. The 25 best discovery cells all fall to
+  ~0 or below on the holdout (classic selection luck).
+- Osc stacks: continuation beat fade in discovery, fade beat continuation in holdout: no
+  stable direction. "ADX decides" (fade < X, ride >= X with DI) did not help at any X.
+- Inverted hammer / hammer at an osc extreme (5m, 15m): no edge either way.
+- FVG: bounce beats break-through in both periods on 5m/15m/1h (1h bounce up after 15 min
+  51-54% of the time) but only ~1-3 bps gross, less than costs with a market entry at the touch.
+- 15m climax (rvol >= 3, wick >= 0.4) *continuation* (trade in the climax bar's direction):
+  positive in both halves (n=201 each, +0.04/+0.09 R, 15-min win 57%/53%), but within noise
+  and r60 flips sign. Watch-list only.
+- Stops: trades that are up after 60 min rarely went more than ~1.5 ATR(5m) against first
+  (median 0.6, 80th pct ~1.2, 90th pct ~1.5-1.6); losers' median is ~2 ATR. A ~1.5 ATR(5m)
+  stop keeps ~90% of eventual winners.
+
+Ideas not yet tested: limit entries at the FVG edge (instead of market at the touch);
+targets scaled per ticker (0.5% is far for SPY/QQQ in an hour); Coulling rules from the
+user's notes (no demand / no supply, stopping volume, tests, upthrusts); levels (prior-day
+H/L, premarket H/L, opening range) as event families; the levels / FVG Pine indicator.
+
 ## Known data problem: Yahoo volume spikes
 
 Yahoo's 5m bars contain bogus volume prints (23 of 4,680 TSLA bars at 8-110x the
