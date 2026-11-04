@@ -63,17 +63,20 @@ def climaxes(b: pd.DataFrame, f: pd.DataFrame, rv: pd.Series, lookback: int = 20
                          "sell_climax": new_lo & (rv >= min_rvol) & (f.lower_frac >= min_wick)})
 
 
-def fvgs(b: pd.DataFrame, a: pd.Series, rv: pd.Series, closes_at: pd.Series, min_atr: float = 0.1) -> pd.DataFrame:
+def fvgs(b: pd.DataFrame, a: pd.Series, rv: pd.Series, closes_at: pd.Series, min_atr: float = 0.1,
+         intraday_only: bool = True) -> pd.DataFrame:
     """Three-bar fair value gaps, known at the close of the third bar.
 
     bull: low[i] > high[i-2] -> zone [high[i-2], low[i]] (support below price)
     bear: high[i] < low[i-2] -> zone [high[i], low[i-2]] (resistance above price)
     Only gaps of at least `min_atr` x ATR. `disp_rvol` is the middle (displacement) bar's
     relative volume: in VPA terms, how much effort made the gap.
-    Gaps never span sessions (the three bars must be from the same day).
+    With intraday_only (default) the three bars must be from the same day; 4h / daily gaps span days.
     """
     h2, l2 = b.high.shift(2), b.low.shift(2)
     same_day = b.index.normalize() == pd.Series(b.index, index=b.index).shift(2).dt.normalize()
+    if not intraday_only:
+        same_day = pd.Series(True, index=b.index)
     bull = (b.low > h2) & same_day
     bear = (b.high < l2) & same_day
     rows = []
