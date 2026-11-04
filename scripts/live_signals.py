@@ -24,7 +24,7 @@ import pandas as pd
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from vpa_trading import live as LV  # noqa: E402
+from vpa_trading import gex as GX, live as LV  # noqa: E402
 
 MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
@@ -36,7 +36,33 @@ def mst(t: pd.Timestamp) -> str:
 def announce(p: LV.Plan) -> None:
     side = "SHORT below" if p.side < 0 else "LONG above"
     print(f"[{mst(p.signal_close)} MST] {p.sym} {p.tf} {p.type} at {p.gap} gap -> {side} {p.entry:.2f}, "
-          f"stop {p.stop:.2f}, target {p.target:.2f}, qty {p.qty} (valid until {mst(p.valid_until)})", flush=True)
+          f"stop {p.stop:.2f}, target {p.target:.2f}, qty {p.qty} (valid until {mst(p.valid_until)})"
+          + (f" | GEX: {p.gex['near'] or 'no level'}, call wall {p.gex['call_wall']:g}, put wall {p.gex['put_wall']:g}, flip {p.gex['flip']}"
+             if p.gex else ""), flush=True)
+
+
+def refresh_gex(cfg: LV.Config, levels: dict, now: pd.Timestamp) -> None:
+    """Our own GEX levels from Alpaca options data, appended to logs/gex/<date>.csv (refreshed every 30 min)."""
+    rows = []
+    for sym in cfg.symbols:
+        try:
+            levels[sym] = GX.levels(sym, now)
+            rows.append({k: v for k, v in levels[sym].items() if not isinstance(v, list)})
+        except Exception as e:  # options data is optional: never stop the scanner for it
+            print(f"GEX {sym} failed: {e}", flush=True)
+    if rows:
+        out = Path("logs/gex") / f"{now:%Y-%m-%d}.csv"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(rows).to_csv(out, mode="a", header=not out.exists(), index=False)
+
+
+def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
+    lv = levels.get(p.sym)
+    if not lv or "call_wall" not in lv:
+        return
+    a5 = float(LV.frame(m, "5m").atr.iloc[-1])
+    p.gex = {"near": GX.near(lv, p.wick, a5), "call_wall": lv["call_wall"], "put_wall": lv["put_wall"],
+             "flip": lv["flip"], "net_gex_musd": lv["net_gex_musd"], "spot": lv["spot"], "asof": lv["time"]}
 
 
 def replay(cfg: LV.Config, day: str) -> None:
@@ -67,6 +93,8 @@ def live(cfg: LV.Config, paper: bool) -> None:
     hist = LV.fetch_bars(cfg.symbols, now - pd.Timedelta(days=45), now, feed="iex")
     daily = LV.fetch_bars(cfg.symbols, now - pd.Timedelta(days=500), now - pd.Timedelta(minutes=20), tf="1Day", feed="sip")
     eng = LV.Engine(cfg, hist, daily)
+    gex_levels: dict = {}
+    gex_at = None
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
     while True:
         now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
@@ -75,6 +103,9 @@ def live(cfg: LV.Config, paper: bool) -> None:
             if paper:
                 LV.Engine.flatten()
             break
+        if gex_at is None or boundary - gex_at >= pd.Timedelta(minutes=30):
+            refresh_gex(cfg, gex_levels, boundary)
+            gex_at = boundary
         today = LV.fetch_bars(cfg.symbols, boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
         if paper:
             eng.refresh_busy()               # never double up after a restart
@@ -92,6 +123,7 @@ def live(cfg: LV.Config, paper: bool) -> None:
                         print(f"[{mst(boundary)} MST] {p.sym} {p.status} {f'{px:.2f}' if px else ''} {p.exit_reason}", flush=True)
             for p in eng.signals(sym, m, boundary):
                 eng.plans.append(p)
+                tag_gex(p, gex_levels, m)
                 announce(p)
                 if paper:
                     eng.submit(p)

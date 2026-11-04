@@ -146,6 +146,7 @@ class Plan:
     exit: float | None = None
     exit_time: pd.Timestamp | None = None
     exit_reason: str = ""
+    gex: dict = field(default_factory=dict)   # our gamma levels at signal time (logged, not used as a filter)
     extra: dict = field(default_factory=dict)
 
 
