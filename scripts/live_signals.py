@@ -71,7 +71,8 @@ def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
 def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float) -> None:
     d = pd.Timestamp(day)
     syms = sorted(set(cfg.symbols) | set(breakout))
-    hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), d + pd.Timedelta(days=1), feed="sip")
+    end = min(d + pd.Timedelta(days=1), pd.Timestamp.now(tz="America/New_York").tz_localize(None) - pd.Timedelta(minutes=20))
+    hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), end, feed="sip")   # free plan: no SIP from the last 15 min
     daily = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=500), d, tf="1Day", feed="sip")
     for sym in breakout:
         nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False)
