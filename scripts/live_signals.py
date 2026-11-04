@@ -87,7 +87,8 @@ def live(cfg: LV.Config, paper: bool) -> None:
                     eng.poll(p, last_bar, boundary)
                     if p.status != before:
                         eng.log(p.status, p)
-                        print(f"[{mst(boundary)} MST] {p.sym} {p.status} {p.fill or ''} {p.exit_reason}", flush=True)
+                        px = p.exit if p.status == "closed" else p.fill
+                        print(f"[{mst(boundary)} MST] {p.sym} {p.status} {f'{px:.2f}' if px else ''} {p.exit_reason}", flush=True)
             for p in eng.signals(sym, m, boundary):
                 eng.plans.append(p)
                 announce(p)

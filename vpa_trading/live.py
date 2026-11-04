@@ -297,14 +297,46 @@ class Engine:
             else:
                 wick_taken = last_bar is not None and ((p.side < 0 and last_bar.high > p.wick) or (p.side > 0 and last_bar.low < p.wick))
                 if wick_taken or now >= p.valid_until:
+                    why = "wick taken first" if wick_taken else "not triggered in time"
                     requests.delete(TRADE + f"/orders/{p.order_id}", headers=headers(), timeout=30)
-                    p.status, p.exit_reason = "cancelled", "wick taken first" if wick_taken else "not triggered in time"
+                    time.sleep(1.0)
+                    o = requests.get(TRADE + f"/orders/{p.order_id}", headers=headers(), params={"nested": "true"}, timeout=30).json()
+                    fq = int(float(o.get("filled_qty") or 0))
+                    if o.get("status") == "filled":
+                        # filled before the cancel landed: the bracket legs are live, manage it normally
+                        p.status, p.fill = "filled", float(o["filled_avg_price"])
+                        p.fill_time = pd.Timestamp(o["filled_at"]).tz_convert("America/New_York").tz_localize(None)
+                    elif fq > 0:
+                        # partial fill: cancelling the parent also cancels its stop/target legs,
+                        # so close the filled shares at market right away instead of leaving them unprotected
+                        p.qty, p.fill = fq, float(o["filled_avg_price"])
+                        p.fill_time = now
+                        px = self._market_exit(p.sym, fq, p.side)
+                        self._close(p, px if px is not None else p.fill, now, f"partial fill {fq}, {why}, closed at market")
+                    else:
+                        p.status, p.exit_reason = "cancelled", why
         if p.status == "filled":
             for leg in o.get("legs") or []:
                 if leg.get("status") == "filled":
                     why = "target" if leg.get("type") == "limit" else "stop"
                     t = pd.Timestamp(leg["filled_at"]).tz_convert("America/New_York").tz_localize(None)
                     self._close(p, float(leg["filled_avg_price"]), t, why)
+
+    @staticmethod
+    def _market_exit(sym: str, qty: int, side: int) -> float | None:
+        """Close `qty` shares of a position opened on `side` with a market order; returns the fill price if known."""
+        body = {"symbol": sym, "qty": str(qty), "side": "sell" if side > 0 else "buy", "type": "market", "time_in_force": "day"}
+        r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
+        if not r.ok:
+            print(f"!! could not close {qty} {sym}: {r.text[:200]}", flush=True)
+            return None
+        oid = r.json()["id"]
+        for _ in range(10):
+            time.sleep(1.0)
+            o = requests.get(TRADE + f"/orders/{oid}", headers=headers(), timeout=30).json()
+            if o.get("status") == "filled":
+                return float(o["filled_avg_price"])
+        return None
 
     def refresh_busy(self) -> None:
         """Symbols that already have a position or a working order at Alpaca (e.g. from before a restart)."""
