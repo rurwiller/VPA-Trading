@@ -241,9 +241,11 @@ def inputs(s) -> dict:
     return x
 
 
-def run(s, x: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Bar-by-bar replay of the setup state machine and the 7 rule backtests."""
-    m1 = s.m1
+def run(s, x: dict, bars: pd.DataFrame | None = None, step: pd.Timedelta = pd.Timedelta(minutes=1)
+        ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Bar-by-bar replay of the setup state machine and the 7 rule backtests.
+    `bars` = the chart's bars (default: 1-minute); `x` must be built for the same bars."""
+    m1 = s.m1 if bars is None else bars
     O, H, L, C = (m1[k].to_numpy().tolist() for k in ("open", "high", "low", "close"))
     X = {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in x.items()}
     n = len(C)
@@ -307,7 +309,7 @@ def run(s, x: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
                 turnA, turnB = tA > tAp, tB > tBp
                 favA, favB = tAb, tBb
                 crossB = tB > ZONE_B and tBp <= ZONE_B
-                conf = X["cold"][i] >= 2
+                conf = X.get("cold_conf", X["cold"])[i] >= 2
             else:
                 seen["ZA"] |= tA >= 100 - ZONE_A
                 seen["ZB"] |= tB >= 100 - ZONE_B
@@ -317,7 +319,7 @@ def run(s, x: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
                 turnA, turnB = tA < tAp, tB < tBp
                 favA, favB = not tAb, not tBb
                 crossB = tB < 100 - ZONE_B and tBp >= 100 - ZONE_B
-                conf = X["hot"][i] >= 2
+                conf = X.get("hot_conf", X["hot"])[i] >= 2
             if not seen["seqA"] and seen["ZA"] and outA:
                 seen["seqA"] = True
             conds = [seen["ZA"] and seen["ZB"] and outA and outB, seen["ZA"] and seen["ZB"] and turnA and turnB,
@@ -375,9 +377,108 @@ def run(s, x: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
                                grade={f"f_{k}": v for k, v in grades[r].items()})
     t = pd.DataFrame(trades)
     if len(t):
-        t["time"] = m1.index[t.entry_i.to_numpy()] + pd.Timedelta(minutes=1)
+        t["time"] = m1.index[t.entry_i.to_numpy()] + step
         t["factors"] = t[["f_st", "f_em", "f_sp", "f_vp"]].sum(axis=1)
     st = pd.DataFrame(setups)
     if len(st):
-        st["time"] = m1.index[st.i.to_numpy()] + pd.Timedelta(minutes=1)
+        st["time"] = m1.index[st.i.to_numpy()] + step
     return t, st
+
+
+def inputs_5m_chart(s) -> tuple[dict, pd.DataFrame]:
+    """The same inputs as `inputs`, but as the script sees them on a 5-MINUTE chart.
+
+    On a 5m chart: the 5m setup value, Fire/Ice, ATR, VPA, take-profit and momentum oscillator
+    are the chart's own; 9m/15m are the last closed higher-timeframe bar; the 1m setup value is
+    the last 1m bar inside the 5m bar; the 1m/3m trigger values ([1] offset) are the bar before
+    the last 1m / 3m bar inside the 5m bar. Bar-count settings (window 16, expiry 30,
+    cooldown 10) are counted in 5m bars.
+    """
+    b = s.tf["5m"].copy()
+    start = b.index.values
+    close = b.closes_at.values
+    one = pd.Timedelta(minutes=1)
+    m1 = s.m1
+    w1 = willard_osc(m1)
+    f1 = pd.DataFrame({"closes_at": s.clock, "osc": w1.osc.to_numpy()}, index=m1.index)
+    f1["bull"] = (f1.osc > psar(f1.osc.to_numpy())).astype(float)
+    basis1 = m1.close.rolling(20).mean()
+    dev1 = 2.0 * m1.close.rolling(20).std(ddof=0)
+    dm1 = ind.dmi(m1)
+    hi1 = dm1.adx > 30
+    f1["cold"] = ((m1.low < basis1 - dev1).astype(int) + hi1.astype(int) + (dm1.mdi > 30).astype(int)).to_numpy()
+    f1["hot"] = ((m1.high > basis1 + dev1).astype(int) + hi1.astype(int) + (dm1.pdi > 30).astype(int)).to_numpy()
+    osc5 = b.osc.to_numpy()
+    x = {"s_5m": osc5, "s_9m": s.osc_clock["9m"], "s_15m": s.osc_clock["15m"]}
+    x["s_9m"] = asof(s.tf["9m"], close, ["osc"]).osc.to_numpy()
+    x["s_15m"] = asof(s.tf["15m"], close, ["osc"]).osc.to_numpy()
+    x["o1_setup"] = asof(f1, close, ["osc"]).osc.to_numpy()
+    v = asof(f1, close - one, ["osc", "bull", "cold", "hot"])
+    x["o1"], x["tB_bull"] = v.osc.to_numpy(), v.bull.to_numpy() == 1
+    x["cold_conf"], x["hot_conf"] = v.cold.fillna(0).to_numpy(), v.hot.fillna(0).to_numpy()
+    x["o1_prev"] = asof(f1, close - 2 * one, ["osc"]).osc.to_numpy()
+    # 3m: the last 3m bar starting inside this 5m bar is at k3; [1] = the bar that closed at k3
+    day = b.index.normalize()
+    ms = ((b.index - day) / one).to_numpy().astype(int) - 570
+    k3 = ((ms + 4) // 3) * 3
+    t_k3 = (day + pd.Timedelta(hours=9, minutes=30) + pd.to_timedelta(k3, unit="m")).values
+    b3 = s.tf["3m"].copy()
+    b3["bull"] = (b3.osc > psar(b3.osc.to_numpy())).astype(float)
+    v = asof(b3, t_k3, ["osc", "bull"])
+    x["tA"], x["tA_bull"] = v.osc.to_numpy(), v.bull.to_numpy() == 1
+    x["tA_prev"] = asof(b3, t_k3 - np.timedelta64(3, "m"), ["osc"]).osc.to_numpy()
+    # Chart-timeframe (5m) Fire/Ice, ATR, VPA, take profit and momentum
+    basis = b.close.rolling(20).mean()
+    dev = 2.0 * b.close.rolling(20).std(ddof=0)
+    dm = ind.dmi(b)
+    adx_hi = dm.adx > 30
+    strong = adx_hi & ((dm.pdi > 30) | (dm.mdi > 30))
+    x["ice"] = ((b.low < basis - dev) & strong).to_numpy()
+    x["fire"] = ((b.high > basis + dev) & strong).to_numpy()
+    x["cold"] = ((b.low < basis - dev).astype(int) + adx_hi.astype(int) + (dm.mdi > 30).astype(int)).to_numpy()
+    x["hot"] = ((b.high > basis + dev).astype(int) + adx_hi.astype(int) + (dm.pdi > 30).astype(int)).to_numpy()
+    x["atr"] = b.atr.to_numpy()
+    x["tpo"], x["mo"], x["mo_prev"] = osc5, osc5, np.r_[np.nan, osc5[:-1]]
+    vs = vpa_side(b).to_numpy()
+    x["vpa_bull"], x["vpa_bear"] = vs == 1, vs == -1
+    x["ema15"] = asof(s.tf["15m"], close, ["ema9"]).ema9.to_numpy()
+    lo, hi = b.low.to_numpy(), b.high.to_numpy()
+    x["near_ema"] = (lo - 0.05 * x["atr"] <= x["ema15"]) & (hi + 0.05 * x["atr"] >= x["ema15"])
+    b15 = s.tf["15m"].copy()
+    w15 = willard_osc(b15)
+    b15 = b15.join(osc_candle(b15, w15.osc, w15.roc))
+    v = asof(b15, close, ["rng", "avg_prev", "body"])
+    big = (v.avg_prev > 0) & (v.rng >= 2.5 * v.avg_prev)
+    x["big_down"], x["big_up"] = (big & (v.body < 0)).to_numpy(), (big & (v.body > 0)).to_numpy()
+    x["ms"] = ms
+    x["late"] = ms >= 355                                  # bar closes within 30 min of 16:00
+    dnum = day.to_numpy()
+    x["first"] = np.r_[True, dnum[1:] != dnum[:-1]]
+    x["lastbar"] = np.r_[dnum[1:] != dnum[:-1], True]
+    atr_pct = x["atr"] / b.close.to_numpy() * 100
+    typ = np.full(len(b), np.nan)
+    slot_a = np.full(100, np.nan)
+    for i in range(len(b)):
+        k = min(max(int(ms[i] // 5), 0), 99)
+        p = slot_a[k]
+        typ[i] = p
+        if not math.isnan(atr_pct[i]):
+            slot_a[k] = atr_pct[i] if math.isnan(p) else p + (2.0 / 21) * (atr_pct[i] - p)
+    x["vol_ok"] = np.where(np.isnan(typ) | (typ <= 0), True, atr_pct >= 0.7 * typ)
+    lo_ok = np.ones(len(b), bool)
+    hi_ok = np.ones(len(b), bool)
+    for key, lv in (("s_5m", SETUP["5m"]), ("s_9m", SETUP["9m"]), ("s_15m", SETUP["15m"]), ("o1_setup", TOUCH_1M)):
+        lo_ok &= barssince(x[key] <= lv) <= ALIGN
+        hi_ok &= barssince(x[key] >= 100 - lv) <= ALIGN
+    x["align_buy_evt"] = lo_ok & ~np.r_[False, lo_ok[:-1]]
+    x["align_sell_evt"] = hi_ok & ~np.r_[False, hi_ok[:-1]]
+    for key, cond in (("bsA_lo", x["tA"] <= ZONE_A), ("bsA_hi", x["tA"] >= 100 - ZONE_A),
+                      ("bsB_lo", x["o1"] <= ZONE_B), ("bsB_hi", x["o1"] >= 100 - ZONE_B),
+                      ("bsA_bear", ~x["tA_bull"]), ("bsA_bull", x["tA_bull"]),
+                      ("bsB_bear", ~x["tB_bull"]), ("bsB_bull", x["tB_bull"]),
+                      ("bsIce", x["ice"]), ("bsFire", x["fire"]),
+                      ("bsCold", x["cold"] >= 2), ("bsHot", x["hot"] >= 2),
+                      ("bsBigDown", x["big_down"]), ("bsBigUp", x["big_up"]),
+                      ("bsVpaBull", x["vpa_bull"]), ("bsVpaBear", x["vpa_bear"])):
+        x[key] = barssince(cond)
+    return x, b
