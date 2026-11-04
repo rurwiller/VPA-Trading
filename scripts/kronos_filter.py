@@ -124,7 +124,8 @@ def report() -> None:
     keep = t.p_target >= 1 / 3
     L.append("\n## Filter: keep only signals Kronos rates at least as well as a random walk (p_target >= 0.333)\n")
     L.append(pd.DataFrame({"kept": summ(t[keep]), "rejected": summ(t[~keep]), "all": summ(t)}).T.to_markdown())
-    corr = t[["p_target", "p_dir_1h", "p_dir_2h", "exp_move_2h_pct"]].corrwith(t.R, method="spearman")
+    ranks = t[["p_target", "p_dir_1h", "p_dir_2h", "exp_move_2h_pct", "R"]].rank()   # Spearman = Pearson on ranks
+    corr = ranks.drop(columns="R").corrwith(ranks.R)
     L.append("\n## Rank correlation of each Kronos score with the real result (R)\n")
     L.append(corr.round(3).to_frame("spearman vs R").to_markdown())
     L.append(f"\nAverage {t.secs.mean():.1f} s per signal on this CPU.")
