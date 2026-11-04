@@ -1,5 +1,21 @@
 # Where this left off (2026-11-03)
 
+## Reassessment (2026-11-04) - read this first
+
+Keep: Alpaca 5y 1m data + research engine with discovery/holdout; the Willard indicator replay
+(`vpa_trading/willard_signals.py`, 1m and 5m charts); stop rule ~1.5-2 x ATR(5m); 1h golden pocket and
+same-side FVG as the only context that improved the indicator in both periods (to breakeven, not profit);
+`pine/vpa_levels_fvg_stops.pine` (not yet compiled by the user).
+Drop as entries: oscillator stacks, single VPA candles/climaxes, key-level touches, confluence counts,
+daily fibs, fib extensions. Kronos: parked until a rule shows an edge (overnight test at most).
+Day-trader-skill (Jakeschincariol): reuse its risk gate (size from max loss, PASS/BLOCK), bracket
+order ticket and scanner ($5+, 1M+ volume) if we move to a gapper universe; it claims no edge.
+
+Next, in order: (1) exits test on the indicator (keep entries, replace/loosen the momentum exit, time
+stops, trail variants); (2) match the replay to the user's chart (browser-prompt data: symbol, dates,
+settings, ETH); (3) option P&L model once the user says what they buy; (4) golden-pocket + FVG factors
+in the Pine indicator for forward testing; (5) gapper universe; (6) entry screen + Alpaca paper orders.
+
 Goal: a tool that helps with better entries on **US stocks, day trading**, using
 TradingView as the chart, Kronos forecasts and the user's own
 **Willard 3.0 Hybrid Oscillator**. The user's chart is in **MST** (New York time
