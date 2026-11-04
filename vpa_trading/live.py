@@ -114,7 +114,7 @@ def climaxes(b: pd.DataFrame) -> pd.DataFrame:
 @dataclass
 class Config:
     symbols: list[str]
-    tfs: tuple = ("2m", "5m", "9m", "15m")
+    tfs: tuple = ("5m", "9m", "15m")
     families: tuple = ("premier", "climax")
     risk_usd: float = 50.0
     max_notional: float = 100_000.0  # never more than this much stock per position (tight stops would oversize)
