@@ -52,10 +52,13 @@ def resample_bars(df: pd.DataFrame, interval: str) -> pd.DataFrame:
     Bins start at 9:30 as on a chart: 15m/30m bins at 9:30, 9:45 ...; 1h bins at 9:30, 10:30 ...
     A partial last bin (an incomplete or early-closed session) is kept.
     """
-    rule = interval.replace("m", "min") if interval.endswith("m") else interval
+    step = pd.Timedelta(interval.replace("m", "min") if interval.endswith("m") else interval)
     agg = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-    # Hourly bins start at 9:30 like a TradingView chart (9:30, 10:30 ... 15:30 short bar).
-    off = "30min" if pd.Timedelta(rule) >= pd.Timedelta("1h") else None
-    out = df.groupby(df.index.date, group_keys=False).apply(lambda d: d.resample(rule, offset=off).agg(agg))
+    # Every bin is anchored at the session open, like a TradingView chart: 1h bins at
+    # 9:30, 10:30 ... 15:30 (short bar); 9m bins at 9:30, 9:39 ... 15:57 (3-minute bar).
+    d = df[list(agg)]
+    open_ = d.index.normalize() + pd.Timedelta(hours=9, minutes=30)
+    start = open_ + ((d.index - open_) // step) * step
+    out = d.groupby(start).agg(agg)
     out.index.name = "timestamps"
     return out.dropna()

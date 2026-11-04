@@ -33,7 +33,7 @@ def check_keys() -> dict:
 
 
 def fetch_bars(symbol: str, start: str, end: str, timeframe: str = "1Min", feed: str = "sip",
-               session: requests.Session | None = None) -> pd.DataFrame:
+               session: requests.Session | None = None, regular_only: bool = True) -> pd.DataFrame:
     """Download bars for [start, end) (ISO dates/times, UTC), following pagination."""
     s = session or requests.Session()
     params = {"timeframe": timeframe, "start": start, "end": end, "feed": feed,
@@ -54,23 +54,29 @@ def fetch_bars(symbol: str, start: str, end: str, timeframe: str = "1Min", feed:
         if not j.get("next_page_token"):
             break
         params["page_token"] = j["next_page_token"]
-    return to_session_frame(rows)
+    return to_session_frame(rows, regular_only)
 
 
-def to_session_frame(rows: list[dict]) -> pd.DataFrame:
+def to_session_frame(rows: list[dict], regular_only: bool = True) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "trade_count", "vwap"])
     df = pd.DataFrame(rows).rename(columns={"t": "timestamps", "o": "open", "h": "high", "l": "low",
                                             "c": "close", "v": "volume", "n": "trade_count", "vw": "vwap"})
     ts = pd.to_datetime(df.pop("timestamps"), utc=True).dt.tz_convert("America/New_York").dt.tz_localize(None)
     df.index = pd.DatetimeIndex(ts, name="timestamps")
-    t = df.index.time
-    df = df[(t >= pd.Timestamp("09:30").time()) & (t < pd.Timestamp("16:00").time())]
+    if regular_only:
+        df = regular_session(df)
     df = df[~df.index.duplicated(keep="last")].sort_index()
     return df[["open", "high", "low", "close", "volume", "trade_count", "vwap"]].astype(float)
 
 
-def load_bars_file(path: str | Path) -> pd.DataFrame:
+def regular_session(df: pd.DataFrame) -> pd.DataFrame:
+    t = df.index.time
+    return df[(t >= pd.Timestamp("09:30").time()) & (t < pd.Timestamp("16:00").time())]
+
+
+def load_bars_file(path: str | Path, regular_only: bool = True) -> pd.DataFrame:
+    """Load a saved bar file; files ending -ext hold extended hours (04:00-20:00 NY)."""
     df = pd.read_csv(path, index_col=0, parse_dates=True)
     df.index.name = "timestamps"
-    return df
+    return regular_session(df) if regular_only else df
