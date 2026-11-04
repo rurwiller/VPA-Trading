@@ -10,6 +10,8 @@
 Options: --tfs 5m 9m 15m (default)   --families premier climax   --target 0.3% | 1R | 2R (R = the candle-based stop distance)   --risk <dollars per trade>
          --max-notional <max dollars of stock per position, default 100000>
          --no-gap (do not require a 1h/4h/D gap)
+         --breakout TSLA (trend-day noise-band breakout, default TSLA; --breakout with nothing after it disables it)
+         --breakout-notional 100000
          --no-trend-filter (shorts are skipped by default when price is above session VWAP or the 5m EMA9 is above EMA21)
 Every signal, order, fill and exit is appended to logs/live/<date>.jsonl; a summary prints at the end of the day.
 """
@@ -25,6 +27,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vpa_trading import gex as GX, live as LV  # noqa: E402
+from vpa_trading.noise_band import NoiseBand  # noqa: E402
 
 MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
@@ -65,10 +68,21 @@ def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
              "flip": lv["flip"], "net_gex_musd": lv["net_gex_musd"], "spot": lv["spot"], "asof": lv["time"]}
 
 
-def replay(cfg: LV.Config, day: str) -> None:
+def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float) -> None:
     d = pd.Timestamp(day)
-    hist = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=45), d + pd.Timedelta(days=1), feed="sip")
+    syms = sorted(set(cfg.symbols) | set(breakout))
+    hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), d + pd.Timedelta(days=1), feed="sip")
     daily = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=500), d, tf="1Day", feed="sip")
+    for sym in breakout:
+        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False)
+        nb.start_day(hist[sym], None, d)
+        today = hist[sym][(hist[sym].index.normalize() == d) & (hist[sym].index.time < pd.Timestamp("16:00").time())]
+        for t in today.index:
+            nb.on_minute(today[today.index <= t], t + pd.Timedelta(minutes=1), blocked=False)
+        if nb.pos:
+            px = float(today.close.iat[-1])
+            print(f"NB {sym} still {'long' if nb.pos > 0 else 'short'} at the close {px:.2f}: approx P&L "
+                  f"{(px - nb.entry) * nb.pos * nb.qty:+.2f}")
     eng = LV.Engine(cfg, hist, daily)
     for sym in cfg.symbols:
         m = hist[sym]
@@ -84,15 +98,21 @@ def replay(cfg: LV.Config, day: str) -> None:
     print(s.to_string(index=False) if len(s) else "no signals")
 
 
-def live(cfg: LV.Config, paper: bool) -> None:
+def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
         return
     now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
-    hist = LV.fetch_bars(cfg.symbols, now - pd.Timedelta(days=45), now, feed="iex")
+    hist = LV.fetch_bars(sorted(set(cfg.symbols) | set(breakout)), now - pd.Timedelta(days=45), now, feed="iex")
     daily = LV.fetch_bars(cfg.symbols, now - pd.Timedelta(days=500), now - pd.Timedelta(minutes=20), tf="1Day", feed="sip")
     eng = LV.Engine(cfg, hist, daily)
+    nbs = []
+    for sym in breakout:
+        nb = NoiseBand(sym, notional, cfg.log_dir, paper)
+        nb.start_day(hist[sym], None, now.normalize())
+        nbs.append(nb)
+        print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
     gex_levels: dict = {}
     gex_at = None
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
@@ -106,7 +126,15 @@ def live(cfg: LV.Config, paper: bool) -> None:
         if gex_at is None or boundary - gex_at >= pd.Timedelta(minutes=30):
             refresh_gex(cfg, gex_levels, boundary)
             gex_at = boundary
-        today = LV.fetch_bars(cfg.symbols, boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
+        today = LV.fetch_bars(sorted(set(cfg.symbols) | set(breakout)), boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
+        for nb in nbs:                        # before refresh_busy, so the candle scanner sees a new breakout position
+            try:
+                t = today.get(nb.sym, pd.DataFrame())
+                t = t[t.index < boundary] if len(t) else t
+                held = any(p.sym == nb.sym and p.status in ("submitted", "filled") for p in eng.plans)
+                nb.on_minute(t, boundary, blocked=held)
+            except Exception as e:      # never let the breakout stop the scanner
+                print(f"NB {nb.sym} error: {e}", flush=True)
         if paper:
             eng.refresh_busy()               # never double up after a restart
         for sym in cfg.symbols:
@@ -154,6 +182,8 @@ def main() -> None:
     ap.add_argument("--target", default="0.3%", help="0.3%% style percent from the entry, or a multiple of the stop distance like 1R / 2R")
     ap.add_argument("--no-gap", action="store_true", help="do not require a 1h/4h/D fair value gap")
     ap.add_argument("--no-trend-filter", action="store_true", help="allow shorts even when price is above VWAP or 5m EMA9 > EMA21")
+    ap.add_argument("--breakout", nargs="*", default=["TSLA"], help="symbols for the trend-day (noise band) breakout; none to disable")
+    ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
     ap.add_argument("--flatten", action="store_true", help="cancel all paper orders, close all positions, print today's log")
@@ -163,9 +193,9 @@ def main() -> None:
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:
-        replay(cfg, a.replay)
+        replay(cfg, a.replay, [x.upper() for x in a.breakout], a.breakout_notional)
     else:
-        live(cfg, a.paper)
+        live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional)
 
 
 if __name__ == "__main__":
