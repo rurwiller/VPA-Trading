@@ -118,7 +118,7 @@ class Config:
     families: tuple = ("premier", "climax")
     risk_usd: float = 50.0
     max_notional: float = 100_000.0  # never more than this much stock per position (tight stops would oversize)
-    target: str = "0.3%"            # "0.3%" style percent, or "2R"
+    target: str = "0.3%"            # "0.3%" style percent, or k x the stop distance like "1R" / "2R"
     require_gap: bool = True
     log_dir: Path = Path("logs/live")
 
@@ -234,8 +234,8 @@ class Engine:
         risk = abs(stop - entry)
         if risk <= 0.0005 * entry:
             return None
-        if self.cfg.target.upper() == "2R":
-            target = round(entry + side * 2 * risk, 2)
+        if self.cfg.target.upper().endswith("R"):                 # k x the stop distance, e.g. 1R, 1.5R, 2R
+            target = round(entry + side * float(self.cfg.target[:-1]) * risk, 2)
         else:
             target = round(entry * (1 + side * float(self.cfg.target.rstrip("%")) / 100), 2)
         qty = int(min(self.cfg.risk_usd // risk, self.cfg.max_notional // entry))

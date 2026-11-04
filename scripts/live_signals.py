@@ -7,7 +7,7 @@
   Live with Alpaca PAPER bracket orders (needs ALPACA_API_KEY / ALPACA_SECRET_KEY for the paper account):
     python scripts/live_signals.py --paper --symbols TSLA NVDA AAPL --risk 50 --target 0.3%
 
-Options: --tfs 2m 5m 9m 15m   --families premier climax   --target 0.3% | 2R   --risk <dollars per trade>
+Options: --tfs 2m 5m 9m 15m   --families premier climax   --target 0.3% | 1R | 2R (R = the candle-based stop distance)   --risk <dollars per trade>
          --max-notional <max dollars of stock per position, default 100000>
          --no-gap (do not require a 1h/4h/D gap)
 Every signal, order, fill and exit is appended to logs/live/<date>.jsonl; a summary prints at the end of the day.
@@ -117,7 +117,7 @@ def main() -> None:
     ap.add_argument("--families", nargs="+", default=["premier", "climax"])
     ap.add_argument("--risk", type=float, default=50.0, help="dollars risked per trade")
     ap.add_argument("--max-notional", type=float, default=100_000.0, help="max dollars of stock per position")
-    ap.add_argument("--target", default="0.3%", help="0.3%% style percent from the entry, or 2R")
+    ap.add_argument("--target", default="0.3%", help="0.3%% style percent from the entry, or a multiple of the stop distance like 1R / 2R")
     ap.add_argument("--no-gap", action="store_true", help="do not require a 1h/4h/D fair value gap")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
