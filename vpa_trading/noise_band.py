@@ -6,9 +6,14 @@
   rules     above upper -> long, below lower -> short; a long exits when price is below max(upper, VWAP), a short
             when above min(lower, VWAP), then may reverse at the same check; flat at the scanner's 15:50 flatten
             (the backtest held to 16:00)
-  orders    market orders sized to a fixed notional, plus a protective stop 2.5% away (not in the backtest: a guard
-            for moves between checks); client_order_id prefix "nb-"
-State (position, qty, protective stop id) is kept in logs/live/nb_<SYM>_<date>.json so a restart picks it up.
+  orders    market orders sized to a fixed notional; client_order_id prefix "nb-"
+  scale out the position is split in thirds: the first third takes profit at 1% from the entry (a resting limit order),
+            the second at 2%, and the last third runs with the rule above. Every third also has a protective stop
+            2.5% from the entry (an OCO pair with its limit, a plain stop for the last third), not in the backtest:
+            a guard for moves between checks. If price is already beyond a level when the orders are placed (for
+            example after a restart), that third is taken at market right away.
+            5-year TSLA test: more winning days (42% -> 48%) and a smaller worst day for a lower average gain.
+State (position, remaining qty, tranches) is kept in logs/live/nb_<SYM>_<date>.json so a restart picks it up.
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ from .live import TRADE, headers
 
 CHECK_MINUTES = list(range(30, 361, 30))   # minutes after 9:30 at which a check happens (10:00 ... 15:30)
 GUARD = 0.025
+SCALE_LEVELS = (0.01, 0.02)      # profit levels (fraction of the entry price) for the first and second third
 
 
 def sigma_curve(hist: pd.DataFrame, day: pd.Timestamp, lookback: int = 14) -> pd.Series:
@@ -47,7 +53,9 @@ class NoiseBand:
         self.sigma = pd.Series(dtype=float)
         self.prev_close = self.open = np.nan
         self.pos, self.qty, self.entry, self.guard_id = 0, 0, np.nan, None
+        self.tranches: list[dict] = []
         self.done: set[int] = set()
+        self.last_bands = (np.nan, np.nan)
 
     # ------------------------------------------------------------ state
     def _state_path(self) -> Path:
@@ -56,7 +64,12 @@ class NoiseBand:
     def _save(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._state_path().write_text(json.dumps({"pos": self.pos, "qty": self.qty, "entry": self.entry,
-                                                  "guard_id": self.guard_id, "done": sorted(self.done)}))
+                                                  "guard_id": self.guard_id, "tranches": self.tranches,
+                                                  "done": sorted(self.done)}))
+
+    @staticmethod
+    def _now() -> pd.Timestamp:
+        return pd.Timestamp.now(tz="America/New_York").tz_localize(None)
 
     def _log(self, kind: str, **kw) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -76,16 +89,22 @@ class NoiseBand:
         if p.exists():
             s = json.loads(p.read_text())
             self.pos, self.qty, self.entry, self.guard_id, self.done = s["pos"], s["qty"], s["entry"], s["guard_id"], set(s["done"])
+            self.tranches = s.get("tranches", [])
         if self.paper and self.pos:
             self._sync()
 
-    def _sync(self) -> None:
-        """If the protective stop filled (or the position is gone), go flat."""
+    def _sync(self, now: pd.Timestamp | None = None) -> None:
+        """Compare with Alpaca: shares closed there (profit-taking limits or protective stops) reduce the tracked qty."""
+        now = now or self._now()
         r = requests.get(TRADE + f"/positions/{self.sym}", headers=headers(), timeout=30)
         have = int(float(r.json()["qty"])) if r.status_code == 200 else 0
         if self.pos and np.sign(have) != self.pos:
-            self._log("guard stop hit / position gone", time=pd.Timestamp.now(tz="America/New_York").tz_localize(None))
-            self.pos, self.qty, self.guard_id = 0, 0, None
+            self._log("position closed at Alpaca (profit targets / protective stop)", time=now)
+            self.pos, self.qty, self.guard_id, self.tranches = 0, 0, None, []
+            self._save()
+        elif self.pos and abs(have) < self.qty:
+            self._log("shares closed at Alpaca (profit target or stop)", time=now, closed=self.qty - abs(have), remaining=abs(have))
+            self.qty = abs(have)
             self._save()
 
     # ------------------------------------------------------------ decisions
@@ -112,7 +131,11 @@ class NoiseBand:
         if np.isnan(self.open):
             self.open = float(today.open.iat[0])
         if self.paper and self.pos:
-            self._sync()
+            self._sync(now)
+            if self.pos and not self.tranches:       # position opened before scale-out existed (or after a restart)
+                self._attach(float(today.close.iat[-1]), now)
+        elif not self.paper and self.pos and self.tranches:
+            self._sim_targets(today.iloc[-1], now)
         minute = int((now - now.normalize()) / pd.Timedelta(minutes=1)) - 570
         if minute not in CHECK_MINUTES or minute in self.done:
             return
@@ -162,28 +185,95 @@ class NoiseBand:
         q = int(float(r.get("filled_qty") or 0))
         return (float(r["filled_avg_price"]) if q else None), q
 
-    def _cancel_guard(self) -> None:
-        if self.guard_id:
-            requests.delete(TRADE + f"/orders/{self.guard_id}", headers=headers(), timeout=30)
-            self.guard_id = None
+    def _cancel_protection(self) -> None:
+        """Cancel every open order this strategy placed on the symbol (profit limits and stops)."""
+        import time
+        r = requests.get(TRADE + "/orders", headers=headers(), params={"status": "open", "symbols": self.sym}, timeout=30)
+        n = 0
+        for o in r.json() if r.ok else []:
+            if o["client_order_id"].startswith("nb-"):
+                requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
+                n += 1
+        if n:
+            time.sleep(1.5)
+        self.guard_id = None
+
+    def _attach(self, px_now: float, now: pd.Timestamp) -> None:
+        """Split the position in thirds and set the protection: limit + stop (OCO) for the first two thirds, a stop
+        for the last. A third whose profit level is already behind us is taken at market."""
+        side = "sell" if self.pos > 0 else "buy"
+        guard = round(self.entry * (1 - self.pos * GUARD), 2)
+        if not self.paper:
+            n = self.qty
+            sizes = [n // 3, n // 3, n - 2 * (n // 3)]
+            self.tranches = [{"qty": sizes[i], "target": round(self.entry * (1 + self.pos * lv), 2), "open": True}
+                             for i, lv in enumerate(SCALE_LEVELS)] + [{"qty": sizes[2], "target": None, "open": True}]
+            return
+        self._cancel_protection()
+        r = requests.get(TRADE + f"/positions/{self.sym}", headers=headers(), timeout=30)
+        have = abs(int(float(r.json()["qty"]))) if r.status_code == 200 else 0
+        if have == 0:
+            self.pos, self.qty, self.tranches = 0, 0, []
+            return
+        sizes = [have // 3, have // 3, have - 2 * (have // 3)]
+        self.tranches, taken = [], 0
+        for i, lv in enumerate(SCALE_LEVELS):
+            q, target = sizes[i], round(self.entry * (1 + self.pos * lv), 2)
+            if q <= 0:
+                continue
+            if (px_now - target) * self.pos >= 0:      # already past this level: take the profit now
+                fill, f = self._wait_fill(self._order(side, q, f"take{i + 1}"))
+                if f:
+                    taken += f
+                    self._log("profit taken", time=now, level=f"{lv:.0%}", qty=f, px=fill, entry=round(self.entry, 2),
+                              approx_pnl=round((fill - self.entry) * self.pos * f, 2))
+                    self.tranches.append({"qty": f, "target": target, "open": False})
+                    continue
+            o = self._order(side, q, f"tp{i + 1}", type="limit", order_class="oco",
+                            take_profit={"limit_price": f"{target:.2f}"}, stop_loss={"stop_price": f"{guard:.2f}"})
+            if o is None:      # never leave a third unprotected
+                self._order(side, q, f"stopfb{i + 1}", type="stop", stop_price=f"{guard:.2f}")
+            self.tranches.append({"qty": q, "target": target, "open": True})
+        q = sizes[2]
+        if q > 0:
+            self._order(side, q, "stop3", type="stop", stop_price=f"{guard:.2f}")
+            self.tranches.append({"qty": q, "target": None, "open": True})
+        self.qty = have - taken
+        if self.qty <= 0:
+            self.pos, self.qty, self.tranches = 0, 0, []
+        self._log("protection set", time=now, remaining=self.qty, stop=guard,
+                  targets=[t["target"] for t in self.tranches if t["target"] and t["open"]])
+        self._save()
+
+    def _sim_targets(self, bar: pd.Series, now: pd.Timestamp) -> None:
+        """Replay only: a profit level counts as filled when a 1m bar reaches it."""
+        for t in self.tranches:
+            if t["open"] and t["target"] and ((self.pos > 0 and bar.high >= t["target"]) or (self.pos < 0 and bar.low <= t["target"])):
+                t["open"] = False
+                self.qty -= t["qty"]
+                self.scaled_pnl = getattr(self, "scaled_pnl", 0.0) + (t["target"] - self.entry) * self.pos * t["qty"]
+                self._log("profit taken", time=now, qty=t["qty"], px=t["target"], entry=round(self.entry, 2),
+                          approx_pnl=round((t["target"] - self.entry) * self.pos * t["qty"], 2))
 
     def _trade(self, want: int, px: float, now: pd.Timestamp) -> None:
         if self.pos != 0:
             if self.paper:
-                self._cancel_guard()
+                self._cancel_protection()
+                self._sync(now)          # shares may have been closed by a profit limit a moment ago
+                if not self.pos:
+                    return
                 fill, q = self._wait_fill(self._order("sell" if self.pos > 0 else "buy", self.qty, "exit"))
                 if q < self.qty:      # exit not (fully) done: keep the rest tracked and retry at the next check
                     self.qty -= q
-                    g = self._order("sell" if self.pos > 0 else "buy", self.qty, "guard", type="stop",
-                                    stop_price=f"{round(self.entry * (1 - self.pos * GUARD), 2):.2f}")
-                    self.guard_id = g["id"] if g else None
+                    self._order("sell" if self.pos > 0 else "buy", self.qty, "guard", type="stop",
+                                stop_price=f"{round(self.entry * (1 - self.pos * GUARD), 2):.2f}")
                     self._log("exit incomplete", time=now, filled=q, still_open=self.qty)
                     return
                 px = fill
             pnl = (px - self.entry) * self.pos * self.qty
             self._log("exit", time=now, px=px, qty=self.qty, side="long" if self.pos > 0 else "short",
                       entry=self.entry, approx_pnl=round(pnl, 2), bands=self.last_bands)
-            self.pos, self.qty = 0, 0
+            self.pos, self.qty, self.tranches = 0, 0, []
         if want != 0:
             qty = int(self.notional // px)
             if self.paper:
@@ -192,8 +282,6 @@ class NoiseBand:
                     self._log("entry not filled (cancelled)", time=now, px=px, qty=qty)
                     return
                 px, qty = fill, q     # adopt whatever filled, even partly
-                guard = round(px * (1 - want * GUARD), 2)
-                g = self._order("sell" if want > 0 else "buy", qty, "guard", type="stop", stop_price=f"{guard:.2f}")
-                self.guard_id = g["id"] if g else None
-            self.pos, self.qty, self.entry = want, qty, px
+            self.pos, self.qty, self.entry, self.tranches = want, qty, px, []
             self._log("entry", time=now, px=px, qty=qty, side="long" if want > 0 else "short", bands=self.last_bands)
+            self._attach(px, now)
