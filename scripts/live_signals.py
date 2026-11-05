@@ -40,6 +40,8 @@ def announce(p: LV.Plan) -> None:
     side = "SHORT below" if p.side < 0 else "LONG above"
     print(f"[{mst(p.signal_close)} MST] {p.sym} {p.tf} {p.type} at {p.gap} gap -> {side} {p.entry:.2f}, "
           f"stop {p.stop:.2f}, target {p.target:.2f}, qty {p.qty} (valid until {mst(p.valid_until)})"
+          + (f" | tags: EMA {'+'.join(p.tags['near_ema']) or '-'}, gaps {'+'.join(p.tags['gap_tfs']) or '-'}"
+             + (" CONFLUENCE" if p.tags.get("confluence") else "") if p.tags and "near_ema" in p.tags else "")
           + (f" | GEX: {p.gex['near'] or 'no level'}, call wall {p.gex['call_wall']:g}, put wall {p.gex['put_wall']:g}, flip {p.gex['flip']}"
              if p.gex else ""), flush=True)
 

@@ -150,6 +150,7 @@ class Plan:
     exit_time: pd.Timestamp | None = None
     exit_reason: str = ""
     gex: dict = field(default_factory=dict)   # our gamma levels at signal time (logged, not used as a filter)
+    tags: dict = field(default_factory=dict)  # EMA / gap confluence at signal time (logged, not used as a filter)
     extra: dict = field(default_factory=dict)
 
 
@@ -226,6 +227,7 @@ class Engine:
                         continue
                 p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap)
                 if p:
+                    p.tags = self._tags(sym, m1, now, wick, bias, a5, gaps)
                     out.append(p)
         return out[:1]          # one order per symbol: the same candle can count as two signal types
 
@@ -241,8 +243,38 @@ class Engine:
             return f"5m EMA9 {e9:.2f} above EMA21 {e21:.2f}"
         return ""
 
+    def _tags(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp, wick: float, bias: int, a5: float, gaps: dict) -> dict:
+        """Which daily / 1h EMAs the wick sits on (within 0.25 ATR(5m)) and which unfilled gaps (15m / 1h / 4h / D) it is in."""
+        try:
+            lv: dict[str, float] = {}
+            d = self.daily.get(sym)
+            if d is not None and len(d):
+                dc = d[d.index < now.normalize()].close
+                px = float(m1.close.iloc[-1])
+                for n in (9, 21):      # daily EMA including the current price, as TradingView draws it
+                    k = 2 / (n + 1)
+                    lv[f"dEMA{n}"] = k * px + (1 - k) * float(dc.ewm(span=n, adjust=False).mean().iloc[-1])
+            b1 = frame(m1, "60m")
+            c1 = b1[b1.closes_at <= now].close
+            for n in (9, 21):
+                lv[f"hEMA{n}"] = float(c1.ewm(span=n, adjust=False).mean().iloc[-1])
+            near = [k for k, v in lv.items() if abs(wick - v) <= 0.25 * a5]
+            buf = 0.25 * a5
+            gtf = []
+            for tf in ("15m", "1h", "4h", "D"):
+                g = gaps.get(tf)
+                if g is None or not len(g):
+                    continue
+                g = g[g.dir == bias]
+                if ((wick >= g.bottom - buf) & (wick <= g.top + buf)).any():
+                    gtf.append(tf)
+            return {"near_ema": near, "gap_tfs": gtf, "confluence": bool(near and gtf),
+                    "levels": {k: round(v, 2) for k, v in lv.items()}}
+        except Exception as e:      # tags are informational: never block a signal
+            return {"error": str(e)[:80]}
+
     def _gaps(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> dict:
-        g = {"1h": live_gaps(frame(m1, "60m"), m1, GAP_SESSIONS["1h"], now),
+        g = {"15m": live_gaps(frame(m1, "15m"), m1, 3, now), "1h": live_gaps(frame(m1, "60m"), m1, GAP_SESSIONS["1h"], now),
              "4h": live_gaps(frame(m1, "4h"), m1, GAP_SESSIONS["4h"], now)}
         d = self.daily.get(sym)
         if d is not None and len(d):
@@ -424,5 +456,7 @@ class Engine:
                              signal_MST=(p.signal_close - pd.Timedelta(hours=2)).strftime("%H:%M"), gap=p.gap,
                              entry=p.entry, stop=p.stop, target=p.target, qty=p.qty, status=p.status,
                              fill=p.fill, slippage=round(slip, 3) if slip == slip else np.nan,
-                             exit=p.exit, why=p.exit_reason, pnl_usd=round(pnl, 2) if pnl == pnl else np.nan))
+                             exit=p.exit, why=p.exit_reason, pnl_usd=round(pnl, 2) if pnl == pnl else np.nan,
+                             near_ema="+".join(p.tags.get("near_ema", [])), gap_tfs="+".join(p.tags.get("gap_tfs", [])),
+                             confluence=bool(p.tags.get("confluence", False))))
         return pd.DataFrame(rows)
