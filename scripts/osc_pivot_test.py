@@ -63,6 +63,14 @@ def run_symbol(sym: str) -> str:
     i, d, ext = ev.i.to_numpy(), ev.dir.to_numpy(), ev.ext.to_numpy().astype(float)
     for t in ("5m", "9m", "15m"):
         ev[f"osc_{t}"] = s.osc_clock[t][i]
+    # 15m EMA 9 as drawn on the chart: includes the current price (partial candle)
+    b15 = V.frame(s.m1, "15m")
+    e15 = b15.close.ewm(span=9, adjust=False).mean().to_numpy()
+    k = np.searchsorted(b15.closes_at.to_numpy(), s.clock[i], side="right") - 1
+    k = np.maximum(k, 0)
+    just_closed = b15.closes_at.to_numpy()[k] == s.clock[i]
+    ev["ema15"] = np.where(just_closed, e15[k], 0.2 * C[i] + 0.8 * e15[k])
+    ev["stretch"] = np.where(d < 0, ext - ev.ema15, ev.ema15 - ext) / s.atr5_clock[i]     # ATR(5m) units beyond the 15m EMA 9
     for tf, g in gaps.items():
         ev[f"gap_{tf}"] = V.near_gap(g, i, ext, s.atr5_clock[i], d)
     ev["at_gap"] = ev.gap_1h | ev.gap_4h | ev.gap_D
@@ -115,6 +123,15 @@ def report() -> None:
                 osc[level] = np.where(u.dir < 0, u[["osc_5m", "osc_9m", "osc_15m"]].min(axis=1) >= level,
                                       u[["osc_5m", "osc_9m", "osc_15m"]].max(axis=1) <= 100 - level)
             rows = [("every pivot-wick candle (5m/9m/15m)", sm)]
+            for x in (0.5, 1.0, 1.5):
+                rows.append((f"wick {x} ATR(5m) beyond the 15m EMA 9", sm & (u.stretch >= x)))
+            for x in (0.5, 1.0, 1.5):
+                rows.append((f"{x} ATR beyond EMA + oscillators >= 80", sm & (u.stretch >= x) & osc[80]) if x == 0.5 else
+                            (f"{x} ATR beyond EMA + oscillators >= 80", sm & (u.stretch >= x) & osc[80]))
+            for x in (0.5, 1.0):
+                rows.append((f"{x} ATR beyond EMA + osc >= 80 + rvol >= 2", sm & (u.stretch >= x) & osc[80] & (u.rvol >= 2)))
+            rows.append(("1.0 ATR beyond EMA + osc >= 80 + rvol >= 2, 5m only", sm & (u.stretch >= 1.0) & osc[80] & (u.rvol >= 2) & (u.tf == "5m")))
+            rows.append(("1.0 ATR beyond EMA + osc >= 80 + rvol >= 2 + gap", sm & (u.stretch >= 1.0) & osc[80] & (u.rvol >= 2) & u.at_gap))
             for level in (70, 80, 90):
                 rows.append((f"all three oscillators >= {level} (<= {100 - level} for longs)", sm & osc[level]))
             rows += [("oscillators >= 80 + rvol >= 2", sm & osc[80] & (u.rvol >= 2)),
