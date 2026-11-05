@@ -40,6 +40,7 @@ def announce(p: LV.Plan) -> None:
     side = "SHORT below" if p.side < 0 else "LONG above"
     print(f"[{mst(p.signal_close)} MST] {p.sym} {p.tf} {p.type} at {p.gap} gap -> {side} {p.entry:.2f}, "
           f"stop {p.stop:.2f}, target {p.target:.2f}, qty {p.qty} (valid until {mst(p.valid_until)})"
+          + (" | ADD to the open position" if p.extra.get("add") else "")
           + (f" | tags: EMA {'+'.join(p.tags['near_ema']) or '-'}, gaps {'+'.join(p.tags['gap_tfs']) or '-'}"
              + (" CONFLUENCE" if p.tags.get("confluence") else "") if p.tags and "near_ema" in p.tags else "")
           + (f" | GEX: {p.gex['near'] or 'no level'}, call wall {p.gex['call_wall']:g}, put wall {p.gex['put_wall']:g}, flip {p.gex['flip']}"
@@ -130,6 +131,8 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float) -> N
             refresh_gex(cfg, gex_levels, boundary)
             gex_at = boundary
         today = LV.fetch_bars(sorted(set(cfg.symbols) | set(breakout)), boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
+        for nb in nbs:
+            eng.external[nb.sym] = nb.pos    # the candle scanner may add to the breakout's direction, never oppose it
         for nb in nbs:                        # before refresh_busy, so the candle scanner sees a new breakout position
             try:
                 t = today.get(nb.sym, pd.DataFrame())
@@ -186,6 +189,8 @@ def main() -> None:
     ap.add_argument("--no-gap", action="store_true", help="do not require a 1h/4h/D fair value gap")
     ap.add_argument("--trend-filter", action="store_true", help="skip shorts when price is above VWAP or the 5m EMA9 is above EMA21 (off by default)")
     ap.add_argument("--no-trend-filter", action="store_true", help=argparse.SUPPRESS)   # old flag, now the default
+    ap.add_argument("--max-adds", type=int, default=1, help="extra same-direction positions allowed on a symbol already in a trade (0 = off)")
+    ap.add_argument("--add-risk", type=float, default=0.0, help="dollars risked on an add (default: the same as --risk)")
     ap.add_argument("--breakout", nargs="*", default=["TSLA"], help="symbols for the trend-day (noise band) breakout; none to disable")
     ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
@@ -193,7 +198,8 @@ def main() -> None:
     ap.add_argument("--flatten", action="store_true", help="cancel all paper orders, close all positions, print today's log")
     a = ap.parse_args()
     cfg = LV.Config(symbols=[s.upper() for s in a.symbols], tfs=tuple(a.tfs), families=tuple(a.families),
-                    risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap, short_trend_filter=a.trend_filter)
+                    risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap, short_trend_filter=a.trend_filter,
+                    max_adds=a.max_adds, add_risk_usd=a.add_risk)
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:

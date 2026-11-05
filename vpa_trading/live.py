@@ -123,6 +123,8 @@ class Config:
     require_pivot: bool = True      # the signal candle's wick must be the extreme of the last `pivot_bars` candles
     pivot_bars: int = 12
     long_min_rvol: float = 3.0      # bullish signals only on extremely high volume (time-of-day relative volume)
+    max_adds: int = 1               # extra positions on a symbol that is already in a trade (same direction only)
+    add_risk_usd: float = 0.0       # risk of an add in dollars; 0 = the same as risk_usd
     short_trend_filter: bool = False   # off: it blocks pivot-high shorts at the top of up-moves (user's choice 2026-11-04)  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
@@ -160,15 +162,26 @@ class Engine:
         self.plans: list[Plan] = []
         self.seen: set = set()
         self.busy: set[str] = set()          # symbols with an open position / order at Alpaca (restart safety)
+        self.external: dict[str, int] = {}   # symbols held by another strategy (the breakout) -> its direction
 
     # ---------------------------------------------------------------- signals
     def signals(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> list[Plan]:
         """Signals whose candle closed exactly at `now` (a 1m boundary)."""
         out = []
         minute = (now - now.normalize()) / pd.Timedelta(minutes=1) - 570
-        if not 30 <= minute <= 360 or sym in self.busy or \
-                any(p.sym == sym and p.status in ("planned", "submitted", "filled") for p in self.plans):
+        if not 30 <= minute <= 360:
             return out
+        active = [p for p in self.plans if p.sym == sym and p.status in ("planned", "submitted", "filled")]
+        filled = [p for p in active if p.status == "filled"]
+        ext = self.external.get(sym, 0)
+        if len(active) > len(filled) or (sym in self.busy and not ext):
+            return out                       # an unfilled order is waiting, or something unknown holds the symbol
+        add_dir = None                       # None: no position yet, any direction. Otherwise only adds in this direction
+        if filled or ext:
+            dirs = {p.side for p in filled} | ({ext} if ext else set())
+            if len(filled) + (1 if ext else 0) > self.cfg.max_adds or len(dirs) != 1:
+                return out
+            add_dir = dirs.pop()
         b5 = frame(m1, "5m")
         a5 = float(b5[b5.closes_at <= now].atr.iloc[-1])
         gaps = None
@@ -199,6 +212,8 @@ class Engine:
                 for _, r in cl[cl.index == t].iterrows():
                     found.append(("climax", r.type, int(r.bias)))
             for fam, typ, bias in found:
+                if add_dir is not None and bias != add_dir:
+                    continue                 # an opposite signal would only net against the open position
                 key = (sym, tf, t, typ)
                 if key in self.seen:
                     continue
@@ -225,9 +240,13 @@ class Engine:
                     if why:
                         print(f"[{(now - pd.Timedelta(hours=2)).strftime('%H:%M')} MST] {sym} {tf} {typ} short skipped: {why}", flush=True)
                         continue
-                p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap)
+                p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap,
+                               risk_usd=(self.cfg.add_risk_usd or self.cfg.risk_usd) if add_dir is not None else None)
                 if p:
                     p.tags = self._tags(sym, m1, now, wick, bias, a5, gaps)
+                    if add_dir is not None:
+                        p.tags["add"] = True
+                        p.extra["add"] = True
                     out.append(p)
         return out[:1]          # one order per symbol: the same candle can count as two signal types
 
@@ -296,7 +315,7 @@ class Engine:
                 return tf
         return "-"
 
-    def _plan(self, sym, tf, fam, typ, bias, now, hi, lo, wick, gap) -> Plan | None:
+    def _plan(self, sym, tf, fam, typ, bias, now, hi, lo, wick, gap, risk_usd: float | None = None) -> Plan | None:
         side = bias
         if side < 0:
             entry = round(lo - 0.01, 2)
@@ -311,7 +330,7 @@ class Engine:
             target = round(entry + side * float(self.cfg.target[:-1]) * risk, 2)
         else:
             target = round(entry * (1 + side * float(self.cfg.target.rstrip("%")) / 100), 2)
-        qty = int(min(self.cfg.risk_usd // risk, self.cfg.max_notional // entry))
+        qty = int(min((risk_usd or self.cfg.risk_usd) // risk, self.cfg.max_notional // entry))
         if qty < 1:
             return None
         step = pd.Timedelta(tf.replace("m", "min"))

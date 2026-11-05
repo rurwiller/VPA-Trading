@@ -105,11 +105,30 @@ class NoiseBand:
         if self.paper and self.pos:
             self._sync()
 
+    def _net_mine(self) -> int | None:
+        """Net shares (+ long / - short) this strategy holds, from its own filled orders today (prefix "nb-", OCO legs
+        included). Independent of what other strategies do in the same symbol (the candle scanner may add to it)."""
+        iso = pd.Timestamp(self.day).tz_localize("America/New_York").isoformat()
+        r = requests.get(TRADE + "/orders", headers=headers(), timeout=30,
+                         params={"status": "all", "after": iso, "symbols": self.sym, "limit": 500, "nested": "true", "direction": "asc"})
+        if not r.ok:
+            return None
+        net = 0.0
+        for o in r.json():
+            if not o["client_order_id"].startswith("nb-"):
+                continue
+            for y in [o] + (o.get("legs") or []):
+                q = float(y.get("filled_qty") or 0)
+                net += q if y["side"] == "buy" else -q
+        return int(round(net))
+
     def _sync(self, now: pd.Timestamp | None = None) -> None:
         """Compare with Alpaca: shares closed there (profit-taking limits or protective stops) reduce the tracked qty."""
         now = now or self._now()
-        r = requests.get(TRADE + f"/positions/{self.sym}", headers=headers(), timeout=30)
-        have = int(float(r.json()["qty"])) if r.status_code == 200 else 0
+        r = requests.get(TRADE + f"/positions/{self.sym}", headers=headers(), timeout=30)   # for the current price only
+        have = self._net_mine()
+        if have is None:
+            return
         if self.pos and np.sign(have) != self.pos:
             self._log("position closed at Alpaca (profit targets / protective stop)", time=now)
             self.pos, self.qty, self.guard_id, self.tranches = 0, 0, None, []
@@ -121,7 +140,7 @@ class NoiseBand:
             if self.paper and self.taken_levels < 2:    # a partial close with the position still open = a profit limit filled
                 self.taken_levels = min(2, self.taken_levels + max(1, round(closed / max(self.orig_qty / 3, 1))))
                 self.breakeven = True
-                px = float(r.json().get("current_price") or self.entry)
+                px = float(r.json().get("current_price") or self.entry) if r.status_code == 200 else float(self.entry)
                 self._attach(px, now)                   # re-place the protection with stops at breakeven
             self._save()
 
@@ -238,8 +257,8 @@ class NoiseBand:
                              for i, lv in enumerate(SCALE_LEVELS)] + [{"qty": sizes[2], "target": None, "open": True}]
             return
         self._cancel_protection()
-        r = requests.get(TRADE + f"/positions/{self.sym}", headers=headers(), timeout=30)
-        have = abs(int(float(r.json()["qty"]))) if r.status_code == 200 else 0
+        net = self._net_mine()
+        have = abs(net) if net is not None else 0
         if have == 0:
             self.pos, self.qty, self.tranches = 0, 0, []
             return
