@@ -155,6 +155,10 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     eng = LV.Engine(cfg, hist, daily)
     aeng = LV.Engine(replace(cfg, risk_usd=alert_risk, families=("premier",), require_gap=False), hist, daily)
     alert = AlertMode(aeng) if alert_risk else None
+    if paper:
+        n_stale = LV.Engine.cancel_stale_entries()
+        if n_stale:
+            print(f"Cancelled {n_stale} unfilled entry order(s) left by an earlier run", flush=True)
     if alert:
         print(f"Candle alert mode on 5m/9m/15m: pivot wick + volume surge + stretch from the 15m EMA 9 + oscillators, "
               f"${alert_risk:,.0f} risk per trade", flush=True)

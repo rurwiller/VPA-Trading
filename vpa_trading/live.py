@@ -456,8 +456,26 @@ class Engine:
 
     @staticmethod
     def flatten() -> None:
+        """Cancel every order, then close every position, retrying until Alpaca shows none (closes finish a moment later)."""
+        import time
         requests.delete(TRADE + "/orders", headers=headers(), timeout=30)
-        requests.delete(TRADE + "/positions", headers=headers(), timeout=30)
+        time.sleep(3)
+        for _ in range(6):
+            requests.delete(TRADE + "/positions", headers=headers(), params={"cancel_orders": "true"}, timeout=30)
+            time.sleep(4)
+            if not requests.get(TRADE + "/positions", headers=headers(), timeout=30).json():
+                break
+
+    @staticmethod
+    def cancel_stale_entries() -> int:
+        """At startup: cancel unfilled entry orders from an earlier run of the scanner (it no longer tracks them, so they
+        would never be cancelled when their window ends and could fill hours later). Filled positions keep their brackets."""
+        n = 0
+        for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json():
+            if o["client_order_id"].startswith(("vpa-", "alert-")) and o.get("filled_qty") in (None, "0"):
+                requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
+                n += 1
+        return n
 
     # ---------------------------------------------------------------- logging
     def log(self, kind: str, p: Plan) -> None:
