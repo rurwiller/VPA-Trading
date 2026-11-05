@@ -141,19 +141,26 @@ class NoiseBand:
         return r.json()
 
     @staticmethod
-    def _wait_fill(o: dict | None, tries: int = 15) -> float | None:
-        """Poll a market order until it fills (a reversal must be flat before the new side is sent)."""
+    def _wait_fill(o: dict | None, tries: int = 60) -> tuple[float | None, int]:
+        """Poll a market order until it fills. If it is still open after `tries` seconds, cancel it and report
+        whatever did fill, so a slow fill is never left untracked. Returns (avg fill price or None, filled qty)."""
         import time
         if not o:
-            return None
+            return None, 0
+        r = o
         for _ in range(tries):
             r = requests.get(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30).json()
             if r.get("status") == "filled":
-                return float(r["filled_avg_price"])
+                return float(r["filled_avg_price"]), int(float(r["filled_qty"]))
             if r.get("status") in ("canceled", "rejected", "expired"):
-                return None
+                break
             time.sleep(1.0)
-        return None
+        if r.get("status") not in ("canceled", "rejected", "expired", "filled"):
+            requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
+            time.sleep(2.0)
+            r = requests.get(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30).json()
+        q = int(float(r.get("filled_qty") or 0))
+        return (float(r["filled_avg_price"]) if q else None), q
 
     def _cancel_guard(self) -> None:
         if self.guard_id:
@@ -164,8 +171,15 @@ class NoiseBand:
         if self.pos != 0:
             if self.paper:
                 self._cancel_guard()
-                fill = self._wait_fill(self._order("sell" if self.pos > 0 else "buy", self.qty, "exit"))
-                px = fill if fill is not None else px
+                fill, q = self._wait_fill(self._order("sell" if self.pos > 0 else "buy", self.qty, "exit"))
+                if q < self.qty:      # exit not (fully) done: keep the rest tracked and retry at the next check
+                    self.qty -= q
+                    g = self._order("sell" if self.pos > 0 else "buy", self.qty, "guard", type="stop",
+                                    stop_price=f"{round(self.entry * (1 - self.pos * GUARD), 2):.2f}")
+                    self.guard_id = g["id"] if g else None
+                    self._log("exit incomplete", time=now, filled=q, still_open=self.qty)
+                    return
+                px = fill
             pnl = (px - self.entry) * self.pos * self.qty
             self._log("exit", time=now, px=px, qty=self.qty, side="long" if self.pos > 0 else "short",
                       entry=self.entry, approx_pnl=round(pnl, 2), bands=self.last_bands)
@@ -173,11 +187,11 @@ class NoiseBand:
         if want != 0:
             qty = int(self.notional // px)
             if self.paper:
-                fill = self._wait_fill(self._order("buy" if want > 0 else "sell", qty, "entry"))
-                if fill is None:
-                    self._log("entry not filled", time=now, px=px, qty=qty)
+                fill, q = self._wait_fill(self._order("buy" if want > 0 else "sell", qty, "entry"))
+                if not q:
+                    self._log("entry not filled (cancelled)", time=now, px=px, qty=qty)
                     return
-                px = fill
+                px, qty = fill, q     # adopt whatever filled, even partly
                 guard = round(px * (1 - want * GUARD), 2)
                 g = self._order("sell" if want > 0 else "buy", qty, "guard", type="stop", stop_price=f"{guard:.2f}")
                 self.guard_id = g["id"] if g else None
