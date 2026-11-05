@@ -371,7 +371,7 @@ class Engine:
         body = {"symbol": p.sym, "qty": str(p.qty), "side": "buy" if p.side > 0 else "sell", "type": "stop",
                 "stop_price": f"{p.entry:.2f}", "time_in_force": "day", "order_class": "bracket",
                 "take_profit": {"limit_price": f"{p.target:.2f}"}, "stop_loss": {"stop_price": f"{p.stop:.2f}"},
-                "client_order_id": f"vpa-{p.sym}-{p.tf}-{p.signal_close:%Y%m%d%H%M}"}
+                "client_order_id": f"{p.extra.get('prefix', 'vpa')}-{p.sym}-{p.tf}-{p.signal_close:%Y%m%d%H%M}"}
         r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
         if not r.ok and "stop price must be" in r.text:
             # price is already through the trigger: enter at market if it is still within half the stop distance
