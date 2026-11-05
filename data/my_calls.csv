@@ -6,3 +6,4 @@ date,time_mst,symbol,tf,side,note
 2026-11-04,10:57,TSLA,9m,short,pivot high with upper wick; better than the scanner's 11:25 / 11:51 shorts
 2026-11-04,12:09,TSLA,9m,short,pivot high (day high 391.99); better than the scanner's 11:25 / 11:51 shorts
 2026-11-05,10:30,AAPL,9m,long,bounce at the daily 9 EMA (343.41) inside an unfilled bullish gap; low 343.20 at 10:36 MST; user expected a bigger move up
+2026-11-05,12:15,TSLA,5m,short,huge shooting star on a volume surge; pivot; stretched above the 15m EMA; 15/9/5 oscillators elevated (our port: 5m 98, 9m 79, 15m 100); user traded it
