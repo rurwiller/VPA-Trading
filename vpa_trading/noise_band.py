@@ -13,6 +13,8 @@
             a guard for moves between checks. If price is already beyond a level when the orders are placed (for
             example after a restart), that third is taken at market right away.
             5-year TSLA test: more winning days (42% -> 48%) and a smaller worst day for a lower average gain.
+  breakeven as soon as the first third has taken its profit, the stop on every remaining third moves to the entry price
+            (the trade can no longer lose); stops are re-placed right then.
 State (position, remaining qty, tranches) is kept in logs/live/nb_<SYM>_<date>.json so a restart picks it up.
 """
 from __future__ import annotations
@@ -54,6 +56,7 @@ class NoiseBand:
         self.prev_close = self.open = np.nan
         self.pos, self.qty, self.entry, self.guard_id = 0, 0, np.nan, None
         self.tranches: list[dict] = []
+        self.orig_qty, self.taken_levels, self.breakeven = 0, 0, False
         self.done: set[int] = set()
         self.last_bands = (np.nan, np.nan)
 
@@ -65,6 +68,8 @@ class NoiseBand:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._state_path().write_text(json.dumps({"pos": self.pos, "qty": self.qty, "entry": self.entry,
                                                   "guard_id": self.guard_id, "tranches": self.tranches,
+                                                  "orig_qty": self.orig_qty, "taken_levels": self.taken_levels,
+                                                  "breakeven": self.breakeven,
                                                   "done": sorted(self.done)}))
 
     @staticmethod
@@ -90,6 +95,13 @@ class NoiseBand:
             s = json.loads(p.read_text())
             self.pos, self.qty, self.entry, self.guard_id, self.done = s["pos"], s["qty"], s["entry"], s["guard_id"], set(s["done"])
             self.tranches = s.get("tranches", [])
+            self.orig_qty = s.get("orig_qty") or (sum(t["qty"] for t in self.tranches) if self.tranches else self.qty)
+            self.taken_levels, self.breakeven = s.get("taken_levels", 0), s.get("breakeven", False)
+            if "breakeven" not in s and self.pos:      # state from before breakeven stops existed
+                sz = [self.orig_qty // 3, self.orig_qty // 3, self.orig_qty - 2 * (self.orig_qty // 3)]
+                self.taken_levels = next((k for k in (0, 1, 2) if self.qty >= sum(sz[k:]) - 1), 0)
+                if self.taken_levels:
+                    self.breakeven, self.tranches = True, []     # empty tranches = re-place the protection next minute
         if self.paper and self.pos:
             self._sync()
 
@@ -103,8 +115,14 @@ class NoiseBand:
             self.pos, self.qty, self.guard_id, self.tranches = 0, 0, None, []
             self._save()
         elif self.pos and abs(have) < self.qty:
-            self._log("shares closed at Alpaca (profit target or stop)", time=now, closed=self.qty - abs(have), remaining=abs(have))
+            closed = self.qty - abs(have)
+            self._log("shares closed at Alpaca (profit target)", time=now, closed=closed, remaining=abs(have))
             self.qty = abs(have)
+            if self.paper and self.taken_levels < 2:    # a partial close with the position still open = a profit limit filled
+                self.taken_levels = min(2, self.taken_levels + max(1, round(closed / max(self.orig_qty / 3, 1))))
+                self.breakeven = True
+                px = float(r.json().get("current_price") or self.entry)
+                self._attach(px, now)                   # re-place the protection with stops at breakeven
             self._save()
 
     # ------------------------------------------------------------ decisions
@@ -198,15 +216,25 @@ class NoiseBand:
             time.sleep(1.5)
         self.guard_id = None
 
+    def _protect(self, q: int, side: str, guard: float, tag: str, now: pd.Timestamp) -> None:
+        """A plain stop for q shares; if the stop is invalid (price already through it) close those shares at market."""
+        if q <= 0:
+            return
+        if self._order(side, q, tag, type="stop", stop_price=f"{guard:.2f}") is None:
+            fill, f = self._wait_fill(self._order(side, q, tag + "mkt"))
+            self._log("stop not valid (price already through it): closed at market", time=now, qty=f, px=fill)
+            self.qty = max(self.qty - f, 0)
+
     def _attach(self, px_now: float, now: pd.Timestamp) -> None:
-        """Split the position in thirds and set the protection: limit + stop (OCO) for the first two thirds, a stop
-        for the last. A third whose profit level is already behind us is taken at market."""
+        """Set the protection for the shares still open: a limit + stop (OCO) for each remaining profit level, a stop for
+        the last third. The stop is 2.5% from the entry, or the entry price itself (breakeven) once a level has been
+        taken. A level that price is already beyond is taken at market."""
         side = "sell" if self.pos > 0 else "buy"
-        guard = round(self.entry * (1 - self.pos * GUARD), 2)
+        guard = round(self.entry, 2) if self.breakeven else round(self.entry * (1 - self.pos * GUARD), 2)
+        orig = self.orig_qty or self.qty
+        sizes = [orig // 3, orig // 3, orig - 2 * (orig // 3)]
         if not self.paper:
-            n = self.qty
-            sizes = [n // 3, n // 3, n - 2 * (n // 3)]
-            self.tranches = [{"qty": sizes[i], "target": round(self.entry * (1 + self.pos * lv), 2), "open": True}
+            self.tranches = [{"qty": sizes[i], "target": round(self.entry * (1 + self.pos * lv), 2), "open": i >= self.taken_levels}
                              for i, lv in enumerate(SCALE_LEVELS)] + [{"qty": sizes[2], "target": None, "open": True}]
             return
         self._cancel_protection()
@@ -215,41 +243,51 @@ class NoiseBand:
         if have == 0:
             self.pos, self.qty, self.tranches = 0, 0, []
             return
-        sizes = [have // 3, have // 3, have - 2 * (have // 3)]
-        self.tranches, taken = [], 0
-        for i, lv in enumerate(SCALE_LEVELS):
-            q, target = sizes[i], round(self.entry * (1 + self.pos * lv), 2)
+        last_q = min(sizes[2], have)
+        rest = have - last_q
+        levels = list(range(self.taken_levels, len(SCALE_LEVELS)))
+        qs = [rest] if len(levels) == 1 else ([rest // 2, rest - rest // 2] if len(levels) == 2 else [])
+        if not levels:
+            last_q = have
+        self.tranches = []
+        for i, q in zip(levels, qs):
+            lv, target = SCALE_LEVELS[i], round(self.entry * (1 + self.pos * SCALE_LEVELS[i]), 2)
             if q <= 0:
                 continue
             if (px_now - target) * self.pos >= 0:      # already past this level: take the profit now
                 fill, f = self._wait_fill(self._order(side, q, f"take{i + 1}"))
                 if f:
-                    taken += f
                     self._log("profit taken", time=now, level=f"{lv:.0%}", qty=f, px=fill, entry=round(self.entry, 2),
                               approx_pnl=round((fill - self.entry) * self.pos * f, 2))
+                    self.taken_levels, self.breakeven, have = max(self.taken_levels, i + 1), True, have - f
                     self.tranches.append({"qty": f, "target": target, "open": False})
                     continue
             o = self._order(side, q, f"tp{i + 1}", type="limit", order_class="oco",
                             take_profit={"limit_price": f"{target:.2f}"}, stop_loss={"stop_price": f"{guard:.2f}"})
-            if o is None:      # never leave a third unprotected
-                self._order(side, q, f"stopfb{i + 1}", type="stop", stop_price=f"{guard:.2f}")
+            if o is None:      # never leave shares unprotected
+                self._protect(q, side, guard, f"stopfb{i + 1}", now)
             self.tranches.append({"qty": q, "target": target, "open": True})
-        q = sizes[2]
-        if q > 0:
-            self._order(side, q, "stop3", type="stop", stop_price=f"{guard:.2f}")
-            self.tranches.append({"qty": q, "target": None, "open": True})
-        self.qty = have - taken
+        if self.breakeven and guard != round(self.entry, 2):   # a level was just taken at market: stops move to breakeven
+            guard = round(self.entry, 2)
+        self._protect(last_q, side, guard, "stop3", now)
+        self.tranches.append({"qty": last_q, "target": None, "open": True})
+        self.qty = max(have, 0)
         if self.qty <= 0:
             self.pos, self.qty, self.tranches = 0, 0, []
-        self._log("protection set", time=now, remaining=self.qty, stop=guard,
+        self._log("protection set", time=now, remaining=self.qty, stop=guard, breakeven=self.breakeven,
                   targets=[t["target"] for t in self.tranches if t["target"] and t["open"]])
         self._save()
 
     def _sim_targets(self, bar: pd.Series, now: pd.Timestamp) -> None:
         """Replay only: a profit level counts as filled when a 1m bar reaches it."""
+        if self.breakeven and self.qty > 0 and ((self.pos > 0 and bar.low <= self.entry) or (self.pos < 0 and bar.high >= self.entry)):
+            self._log("breakeven stop", time=now, qty=self.qty, px=round(self.entry, 2))
+            self.pos, self.qty, self.tranches = 0, 0, []
+            return
         for t in self.tranches:
             if t["open"] and t["target"] and ((self.pos > 0 and bar.high >= t["target"]) or (self.pos < 0 and bar.low <= t["target"])):
                 t["open"] = False
+                self.taken_levels, self.breakeven = self.taken_levels + 1, True
                 self.qty -= t["qty"]
                 self.scaled_pnl = getattr(self, "scaled_pnl", 0.0) + (t["target"] - self.entry) * self.pos * t["qty"]
                 self._log("profit taken", time=now, qty=t["qty"], px=t["target"], entry=round(self.entry, 2),
@@ -274,6 +312,7 @@ class NoiseBand:
             self._log("exit", time=now, px=px, qty=self.qty, side="long" if self.pos > 0 else "short",
                       entry=self.entry, approx_pnl=round(pnl, 2), bands=self.last_bands)
             self.pos, self.qty, self.tranches = 0, 0, []
+            self.orig_qty, self.taken_levels, self.breakeven = 0, 0, False
         if want != 0:
             qty = int(self.notional // px)
             if self.paper:
@@ -283,5 +322,6 @@ class NoiseBand:
                     return
                 px, qty = fill, q     # adopt whatever filled, even partly
             self.pos, self.qty, self.entry, self.tranches = want, qty, px, []
+            self.orig_qty, self.taken_levels, self.breakeven = qty, 0, False
             self._log("entry", time=now, px=px, qty=qty, side="long" if want > 0 else "short", bands=self.last_bands)
             self._attach(px, now)
