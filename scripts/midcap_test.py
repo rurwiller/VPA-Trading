@@ -21,7 +21,8 @@ MID = ["SOFI", "HOOD", "RIVN", "AFRM", "MARA", "RIOT", "SMCI", "DKNG", "ROKU", "
 MAG = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "SPY", "QQQ", "AMD"]
 # median quoted spread (bps), sampled from Alpaca SIP quotes on 2026-10-28 and 2026-11-03 at 10:00/13:00/15:30 ET
 SPREAD_BPS = {"SOFI": 5.9, "HOOD": 3.3, "RIVN": 8.6, "AFRM": 13.8, "MARA": 14.2, "RIOT": 7.3, "SMCI": 3.2,
-              "DKNG": 5.0, "ROKU": 1.9, "CVNA": 5.1, "TSLA": 1.5, "NVDA": 0.9, "AAPL": 0.9, "SPY": 0.4}
+              "DKNG": 5.0, "ROKU": 1.9, "CVNA": 5.1, "TSLA": 1.5, "NVDA": 0.9, "AAPL": 0.9, "SPY": 0.4,
+              "GLD": 0.6, "SLV": 2.1}
 SPLIT = pd.Timestamp("2024-11-01")
 
 
