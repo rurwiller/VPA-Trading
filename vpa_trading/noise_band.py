@@ -13,6 +13,10 @@
             a guard for moves between checks. If price is already beyond a level when the orders are placed (for
             example after a restart), that third is taken at market right away.
             5-year TSLA test: more winning days (42% -> 48%) and a smaller worst day for a lower average gain.
+  opposite   while in a position, a pivot-wick candle of the OPPOSITE kind (a top while long, a bottom while short) on 9m or
+  signal     15m with volume >= 3x the usual closes -> the rest of the position is sold at that candle's close. The breakout may
+            re-enter at the next check if the rule says so (blocking re-entry tested worse). 5-year TSLA/AMD/QQQ test:
+            neutral to slightly positive at 3x, harmful at lower volume.
   breakeven as soon as the first third has taken its profit, the stop on every remaining third moves to the entry price
             (the trade can no longer lose); stops are re-placed right then.
 State (position, remaining qty, tranches) is kept in logs/live/nb_<SYM>_<date>.json so a restart picks it up.
@@ -26,7 +30,9 @@ import numpy as np
 import pandas as pd
 import requests
 
-from .live import TRADE, headers
+from .alert import pivot_wick
+from .live import TRADE, frame, headers
+from . import vpa
 
 CHECK_MINUTES = list(range(30, 361, 30))   # minutes after 9:30 at which a check happens (10:00 ... 15:30)
 GUARD = 0.025
@@ -49,8 +55,9 @@ def sigma_curve(hist: pd.DataFrame, day: pd.Timestamp, lookback: int = 14) -> pd
 
 
 class NoiseBand:
-    def __init__(self, sym: str, notional: float, log_dir: Path, paper: bool):
+    def __init__(self, sym: str, notional: float, log_dir: Path, paper: bool, exit_opposite: bool = True, exit_rvol: float = 3.0):
         self.sym, self.notional, self.log_dir, self.paper = sym, notional, log_dir, paper
+        self.exit_opposite, self.exit_rvol = exit_opposite, exit_rvol
         self.day = None
         self.sigma = pd.Series(dtype=float)
         self.prev_close = self.open = np.nan
@@ -161,7 +168,20 @@ class NoiseBand:
         self.last_bands = (round(lb, 2), round(ub, 2))
         return want
 
-    def on_minute(self, today: pd.DataFrame, now: pd.Timestamp, blocked: bool) -> None:
+    def _opposite_signal(self, full: pd.DataFrame, now: pd.Timestamp):
+        """(timeframe, volume multiple) if a high-volume pivot-wick candle against the position just closed, else None."""
+        for tf in ("15m", "9m"):
+            b = frame(full, tf)
+            done = b[b.closes_at <= now]
+            if len(done) < 14 or done.closes_at.iloc[-1] != now:
+                continue
+            if pivot_wick(done) == -self.pos:
+                rv = float(vpa.relvol_tod(done).iat[-1])
+                if rv >= self.exit_rvol:
+                    return tf, round(rv, 1)
+        return None
+
+    def on_minute(self, today: pd.DataFrame, now: pd.Timestamp, blocked: bool, full: pd.DataFrame | None = None) -> None:
         """Call once per minute with today's 1m bars closed before `now`. blocked = the candle scanner holds this symbol."""
         if not len(today):
             return
@@ -173,6 +193,14 @@ class NoiseBand:
                 self._attach(float(today.close.iat[-1]), now)
         elif not self.paper and self.pos and self.tranches:
             self._sim_targets(today.iloc[-1], now)
+        if self.pos and self.exit_opposite and full is not None:
+            sig = self._opposite_signal(full, now)
+            if sig:
+                self._log("exit signal: opposite pivot candle on volume", time=now, tf=sig[0], volume=f"{sig[1]}x",
+                          holding="long" if self.pos > 0 else "short")
+                self._trade(0, float(today.close.iat[-1]), now)
+                self._save()
+                return
         minute = int((now - now.normalize()) / pd.Timedelta(minutes=1)) - 570
         if minute not in CHECK_MINUTES or minute in self.done:
             return

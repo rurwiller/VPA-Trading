@@ -19,6 +19,22 @@ from .live import Engine, Plan, frame
 from .willard_osc import willard_osc
 
 
+def pivot_wick(done: pd.DataFrame, n: int = 12) -> int:
+    """-1 if the last closed candle is a pivot-wick TOP, +1 if a pivot-wick BOTTOM, else 0 (the alert mode's candle rule)."""
+    if len(done) < n + 2:
+        return 0
+    o, h, l, c = (float(done[k].iat[-1]) for k in ("open", "high", "low", "close"))
+    rng = h - l
+    if rng <= 0:
+        return 0
+    up, dn, body = h - max(o, c), min(o, c) - l, abs(c - o)
+    if up >= 0.4 * rng and up >= body and dn <= 0.3 * rng and h >= float(done.high.iloc[-n:].max()):
+        return -1
+    if dn >= 0.4 * rng and dn >= body and up <= 0.3 * rng and l <= float(done.low.iloc[-n:].min()):
+        return 1
+    return 0
+
+
 class AlertMode:
     def __init__(self, eng: Engine, level: float = 75.0, min_rvol: float = 2.0, min_stretch: float = 0.5,
                  tfs: tuple = ("15m", "9m", "5m"), pivot_bars: int = 12):

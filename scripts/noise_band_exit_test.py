@@ -52,7 +52,7 @@ def flags(sym: str, idx: pd.DatetimeIndex, tfs, min_rvol):
     return top, bot
 
 
-def run(sym, data, opp=None, scale=True, be=True) -> pd.Series:
+def run(sym, data, opp=None, scale=True, be=True, lock=False) -> pd.Series:
     C, O, VW, Hh, Ll = data
     c, o, vw = C.to_numpy(), O.to_numpy(), VW.to_numpy()
     prev = np.r_[np.nan, c[:-1, 389]]
@@ -65,6 +65,7 @@ def run(sym, data, opp=None, scale=True, be=True) -> pd.Series:
         if np.isnan(sigma[k, CHECKS[0]]) or np.isnan(prev[k]):
             continue
         pos, entry, rem, ret, targets, tfr, be_on = 0, 0.0, 0.0, 0.0, [], [], False
+        locked = False
 
         def close(px, frac):
             nonlocal ret
@@ -83,9 +84,9 @@ def run(sym, data, opp=None, scale=True, be=True) -> pd.Series:
                 if pos != 0 and rem > 1e-9:
                     close(px, rem)
                     rem = 0.0
-                if want != 0:
+                if want != 0 and not locked:
                     entry, rem, targets, tfr, be_on = px, 1.0, [px * (1 + want * l) for l in levels], list(fracs), False
-                pos = want
+                pos = want if not locked else pos
             if pos == 0:
                 continue
             end = CHECKS[ci + 1] if ci + 1 < len(CHECKS) else 389
@@ -103,6 +104,7 @@ def run(sym, data, opp=None, scale=True, be=True) -> pd.Series:
                 if opp is not None and rem > 1e-9 and ((pos > 0 and opp[0][k, b]) or (pos < 0 and opp[1][k, b])):
                     close(c[k, b], rem)
                     rem, pos = 0.0, 0
+                    locked = lock
                     break
         if pos != 0 and rem > 1e-9:
             close(c[k, 389], rem)
@@ -117,10 +119,14 @@ def main() -> None:
         rows = []
         variants = [("live breakout (thirds + breakeven), no opposite-signal exit", None)]
         for tfs in (("9m",), ("9m", "15m"), ("5m", "9m", "15m")):
-            for rv in (1.5, 2.0, 3.0):
+            for rv in (3.0,):
                 variants.append((f"+ exit on opposite pivot candle, {'+'.join(tfs)}, volume >= {rv}x", flags(sym, idx, tfs, rv)))
+                variants.append((f"  same, and no re-entry that day", (flags(sym, idx, tfs, rv), True)))
         for name, opp in variants:
-            r = run(sym, data, opp)
+            lock = False
+            if isinstance(opp, tuple) and len(opp) == 2 and isinstance(opp[1], bool):
+                opp, lock = opp
+            r = run(sym, data, opp, lock=lock)
             d = r.index < SPLIT
             rows.append({"variant": name, "bps_before": r[d].mean() * 1e4, "bps_after": r[~d].mean() * 1e4,
                          "sharpe_before": r[d].mean() / r[d].std() * np.sqrt(252),

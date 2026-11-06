@@ -99,18 +99,18 @@ def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
              "flip": lv["flip"], "net_gex_musd": lv["net_gex_musd"], "spot": lv["spot"], "asof": lv["time"]}
 
 
-def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0) -> None:
+def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True) -> None:
     d = pd.Timestamp(day)
     syms = sorted(set(cfg.symbols) | set(breakout))
     end = min(d + pd.Timedelta(days=1), pd.Timestamp.now(tz="America/New_York").tz_localize(None) - pd.Timedelta(minutes=20))
     hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), end, feed="sip")   # free plan: no SIP from the last 15 min
     daily = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=500), d, tf="1Day", feed="sip")
     for sym in breakout:
-        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False)
+        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit)
         nb.start_day(hist[sym], None, d)
         today = hist[sym][(hist[sym].index.normalize() == d) & (hist[sym].index.time < pd.Timestamp("16:00").time())]
         for t in today.index:
-            nb.on_minute(today[today.index <= t], t + pd.Timedelta(minutes=1), blocked=False)
+            nb.on_minute(today[today.index <= t], t + pd.Timedelta(minutes=1), blocked=False, full=hist[sym][hist[sym].index <= t])
         if nb.pos:
             px = float(today.close.iat[-1])
             print(f"NB {sym} still {'long' if nb.pos > 0 else 'short'} at the close {px:.2f}: approx P&L "
@@ -144,7 +144,7 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
         print(sa.to_string(index=False) if len(sa) else "no alerts")
 
 
-def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0) -> None:
+def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
@@ -164,7 +164,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
               f"${alert_risk:,.0f} risk per trade", flush=True)
     nbs = []
     for sym in breakout:
-        nb = NoiseBand(sym, notional, cfg.log_dir, paper)
+        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit)
         nb.start_day(hist[sym], None, now.normalize())
         nbs.append(nb)
         print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
@@ -191,7 +191,8 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
                 t = today.get(nb.sym, pd.DataFrame())
                 t = t[t.index < boundary] if len(t) else t
                 held = any(p.sym == nb.sym and p.status in ("submitted", "filled") for p in eng.plans)
-                nb.on_minute(t, boundary, blocked=held)
+                full = pd.concat([hist[nb.sym][hist[nb.sym].index.normalize() < boundary.normalize()], t]) if len(t) else None
+                nb.on_minute(t, boundary, blocked=held, full=full)
             except Exception as e:      # never let the breakout stop the scanner
                 print(f"NB {nb.sym} error: {e}", flush=True)
         if paper:
@@ -263,6 +264,7 @@ def main() -> None:
     ap.add_argument("--add-risk", type=float, default=0.0, help="dollars risked on an add (default: the same as --risk)")
     ap.add_argument("--alert-risk", type=float, default=500.0, help="candle alert mode: dollars risked per trade (0 turns the mode off)")
     ap.add_argument("--breakout", nargs="*", default=["TSLA"], help="symbols for the trend-day (noise band) breakout; none to disable")
+    ap.add_argument("--no-breakout-exit", action="store_true", help="do not sell the breakout on an opposite high-volume pivot candle")
     ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
@@ -274,9 +276,9 @@ def main() -> None:
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:
-        replay(cfg, a.replay, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk)
+        replay(cfg, a.replay, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit)
     else:
-        live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk)
+        live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit)
 
 
 if __name__ == "__main__":
