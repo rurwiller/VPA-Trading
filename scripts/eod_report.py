@@ -85,7 +85,7 @@ def main() -> None:
         return ts.tz_convert(MST).strftime("%H:%M")
     print(f"# End of day report, {day:%a %b %d %Y}\n")
     if rows:
-        print("| # | In | Out | Stock | Strategy | Side | Shares | Entry | Exit | P&L | How it ended |")
+        print("| # | In | Out | Stock | Strategy | Side | Shares | Entry | Exit | $ P/L | How it ended |")
         print("|--:|----|-----|-------|----------|------|-------:|------:|-----:|----:|--------------|")
         for i, x in enumerate(rows, 1):
             print(f"| {i} | {t(x['t_in'])} | {t(x['t_out'])} | {x['sym']} | {x['strat']} | {x['side']} | {x['q']} | {x['entry']:.2f} | "
@@ -97,12 +97,14 @@ def main() -> None:
     print("\n## Totals\n")
     df = pd.DataFrame(rows)
     if len(df):
-        g = df.groupby("strat").agg(pieces=("pnl", "size"), wins=("pnl", lambda x: int((x > 0).sum())), pnl=("pnl", "sum"))
-        print("| Strategy | Pieces | Winning | P&L |\n|----------|-------:|--------:|----:|")
+        # one trade = one position opened (a breakout sold in thirds counts once); it wins if it made money overall
+        tr = df.groupby(["strat", "sym", "t_in"]).pnl.sum().reset_index()
+        g = tr.groupby("strat").agg(trades=("pnl", "size"), wins=("pnl", lambda x: int((x > 0).sum())), pnl=("pnl", "sum"))
+        print("| Strategy | Trades | Won | % win | $ P/L | % P/L |\n|----------|-------:|----:|------:|------:|------:|")
         for s, x in g.iterrows():
-            print(f"| {s} | {int(x.pieces)} | {int(x.wins)} | {'+' if x.pnl >= 0 else '-'}${abs(x.pnl):,.0f} |")
-        tot = df.pnl.sum()
-        print(f"| **All trades** | {len(df)} | {int((df.pnl > 0).sum())} | **{'+' if tot >= 0 else '-'}${abs(tot):,.0f}** |")
+            print(f"| {s} | {int(x.trades)} | {int(x.wins)} | {x.wins / x.trades:.0%} | {'+' if x.pnl >= 0 else '-'}${abs(x.pnl):,.0f} | {x.pnl / last:+.2%} |")
+        tot, nw = tr.pnl.sum(), int((tr.pnl > 0).sum())
+        print(f"| **All trades** | {len(tr)} | {nw} | {nw / len(tr):.0%} | **{'+' if tot >= 0 else '-'}${abs(tot):,.0f}** | **{tot / last:+.2%}** |")
     print(f"\nAccount equity: ${last:,.2f} -> ${eq:,.2f} (**{'+' if eq >= last else '-'}${abs(eq - last):,.2f}**)")
     p = Path("logs/live") / f"{day:%Y-%m-%d}.jsonl"
     if p.exists():
