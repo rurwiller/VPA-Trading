@@ -38,8 +38,8 @@ def how(kind: str, cid: str) -> str:
     return "closed at flatten"
 
 
-def main() -> None:
-    day = pd.Timestamp(sys.argv[1] if len(sys.argv) > 1 else pd.Timestamp.now(tz=MST).strftime("%Y-%m-%d"))
+def get_pieces(day: pd.Timestamp):
+    """Every closed piece of a position on `day` (first-in-first-out per symbol) and the lots still open."""
     start = day.tz_localize("America/New_York")
     r = requests.get(LV.TRADE + "/orders", headers=LV.headers(), timeout=30,
                      params={"status": "all", "after": start.isoformat(), "until": (start + pd.Timedelta(days=1)).isoformat(),
@@ -72,7 +72,12 @@ def main() -> None:
         if qty:
             book.append(dict(t=f["t"], side=f["side"], q=qty, px=f["px"], strat=f["strat"]))
     rows.sort(key=lambda x: (x["t_in"], x["t_out"]))
-    open_lots = [(s, l) for s, b in lots.items() for l in b]
+    return rows, [(s, l) for s, b in lots.items() for l in b]
+
+
+def main() -> None:
+    day = pd.Timestamp(sys.argv[1] if len(sys.argv) > 1 else pd.Timestamp.now(tz=MST).strftime("%Y-%m-%d"))
+    rows, open_lots = get_pieces(day)
     a = requests.get(LV.TRADE + "/account", headers=LV.headers(), timeout=30).json()
     eq, last = float(a["equity"]), float(a["last_equity"])
 
