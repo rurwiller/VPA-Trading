@@ -1,0 +1,41 @@
+//@version=5
+// Key levels from the morning sheet (scripts/key_levels.py). Paste the day's line from
+// logs/keylevels/<date>_tradingview.txt into "Levels". One paste holds every ticker; the chart shows its own.
+// Format, zones separated by ";":   TICKER|low|high|score|what is there
+indicator("Key levels (morning sheet)", overlay = true, max_boxes_count = 60, max_labels_count = 60, max_lines_count = 60)
+
+string txt      = input.text_area("", "Levels (paste the morning line)")
+float  minScore = input.float(0.0, "Hide zones scoring under", step = 0.5)
+bool   showText = input.bool(true, "Show what is at each zone")
+color  upCol    = input.color(color.new(color.red, 0), "Above price")
+color  dnCol    = input.color(color.new(color.green, 0), "Below price")
+int    ahead    = input.int(12, "Label offset (bars)", minval = 1)
+
+var box[]   boxes  = array.new_box()
+var label[] labels = array.new_label()
+
+if barstate.islast
+    // clear the previous drawing
+    while array.size(boxes) > 0
+        box.delete(array.pop(boxes))
+    while array.size(labels) > 0
+        label.delete(array.pop(labels))
+    string[] rows = str.split(txt, ";")
+    for r in rows
+        string[] f = str.split(r, "|")
+        if array.size(f) >= 4
+            if str.upper(str.trim(array.get(f, 0))) == syminfo.ticker
+                float lo = str.tonumber(array.get(f, 1))
+                float hi = str.tonumber(array.get(f, 2))
+                float sc = str.tonumber(array.get(f, 3))
+                string what = array.size(f) >= 5 ? array.get(f, 4) : ""
+                if not na(lo) and not na(hi) and not na(sc) and sc >= minScore
+                    color c = (lo + hi) / 2 >= close ? upCol : dnCol
+                    // stronger zones are drawn more solid: score 3 is faint, 12+ is strong
+                    int fade = int(math.max(55, 90 - sc * 3))
+                    float pad = hi - lo < syminfo.mintick * 2 ? syminfo.mintick : 0.0
+                    box b = box.new(bar_index - 300, hi + pad, bar_index + ahead, lo - pad, border_color = color.new(c, 30), border_width = sc >= 10 ? 2 : 1, bgcolor = color.new(c, fade), extend = extend.none)
+                    array.push(boxes, b)
+                    string t = str.tostring(lo, format.mintick) + (hi - lo >= syminfo.mintick * 2 ? "-" + str.tostring(hi, format.mintick) : "") + "  [" + str.tostring(sc) + "]" + (showText ? "  " + what : "")
+                    label l = label.new(bar_index + ahead, (lo + hi) / 2, t, style = label.style_label_left, color = color.new(c, 85), textcolor = c, size = size.small)
+                    array.push(labels, l)

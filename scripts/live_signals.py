@@ -35,6 +35,7 @@ from vpa_trading.alert import AlertMode  # noqa: E402
 from vpa_trading.noise_band import NoiseBand  # noqa: E402
 from vpa_trading.terrashade import TerraShadeFeed  # noqa: E402
 from vpa_trading import levels as LVL  # noqa: E402
+from vpa_trading import keylevels as KL  # noqa: E402
 
 MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
@@ -104,6 +105,22 @@ def tag_levels(p: LV.Plan, lv: pd.DataFrame, m: pd.DataFrame) -> None:
     hits = LVL.near(lv, p.sym, p.wick, 0.25 * a5)
     p.tags["levels"] = hits
     print(f"    levels: {LVL.label(hits) if hits else 'none near the wick'}", flush=True)
+
+
+def tag_key_zone(p: LV.Plan, sheet: pd.DataFrame | None, m: pd.DataFrame) -> None:
+    """Which key zone of the morning sheet (logs/keylevels/) the signal's wick is at. Logged only, never a filter."""
+    if sheet is None:
+        return
+    try:
+        day = m[m.index.normalize() == p.signal_close.normalize()]
+        f30 = day[day.index.time < pd.Timestamp("10:00").time()]
+        step = pd.Timedelta(p.tf.replace("m", "min"))
+        late = p.signal_close - step >= p.signal_close.normalize() + pd.Timedelta(hours=10)    # candle began after the range was set
+        z = KL.zone_at(sheet, p.sym, p.wick, (f30.high.max(), f30.low.min()) if late and len(f30) else None)
+        p.tags["key_zone"] = {"zone": z.price(), "score": z.score, "what": z.label(4), "families": z.families} if z else None
+        print(f"    key zone: {f'{z.price()} score {z.score:g} ({z.label(3)})' if z else 'none at the wick'}", flush=True)
+    except Exception as e:      # a tag must never stop a signal
+        print(f"    key zone: error {str(e)[:80]}", flush=True)
 
 
 def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
@@ -248,6 +265,9 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     if len(posted):
         print(f"Posted levels loaded: {len(posted)} from {', '.join(sorted(posted.source.unique()))} "
               f"({', '.join(sorted(posted.sym.unique()))})", flush=True)
+    st["sheet"] = KL.load_sheet(now)
+    print("Key levels sheet: " + (f"{len(st['sheet'])} levels for {st['sheet'].sym.nunique()} tickers" if st["sheet"] is not None
+                                  else "not made today (run scripts/key_levels.py); signals get no key-zone tag"), flush=True)
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
     fails = 0
     while True:
@@ -327,12 +347,12 @@ def minute_step(cfg, paper, boundary, syms, hist, eng, aeng, alert, nbs, ts, pos
             print(f"half exits error: {e}", flush=True)
     for sym in cfg.symbols:
         try:
-            symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, posted, gex_levels)
+            symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, posted, gex_levels, st.get("sheet"))
         except Exception as e:      # one symbol's problem must not skip the others
             print(f"[{mst(boundary)} MST] !! {sym}: {type(e).__name__}: {str(e)[:200]}", flush=True)
 
 
-def symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, posted, gex_levels) -> None:
+def symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, posted, gex_levels, sheet=None) -> None:
     m = pd.concat([hist[sym][hist[sym].index.normalize() < boundary.normalize()], today.get(sym, pd.DataFrame())])
     m = m[m.index < boundary]
     last_bar = m.iloc[-1] if len(m) else None
@@ -355,6 +375,7 @@ def symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, po
             p.gex["terrashade"] = ts.tag(p.sym)
         announce(p)
         tag_levels(p, posted, m)
+        tag_key_zone(p, sheet, m)
         if paper:
             eng.submit(p)
         eng.log("signal", p)
@@ -371,6 +392,7 @@ def symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, po
             p.gex["terrashade"] = ts.tag(p.sym)
         announce_alert(p, why)
         tag_levels(p, posted, m)
+        tag_key_zone(p, sheet, m)
         aeng.log("signal", p)
 
 

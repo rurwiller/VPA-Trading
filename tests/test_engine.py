@@ -227,3 +227,56 @@ def test_gex_walls_sit_on_the_right_side_of_price(monkeypatch):
 def test_terrashade_parse_alert_post():
     m = {"content": "", "embeds": [{"title": "TSLA · Alert", "description": "**TSLA** moved below put wall **375.00**. Spot **374.97**."}]}
     assert parse(m, {"TSLA"}) == {"TSLA": {"put wall": 375.0, "alert": "moved below put wall 375", "spot": 374.97}}
+
+
+def _ctx_days(n=260):
+    """n sessions of 1m bars (premarket 08:00-09:30 and the regular session) on a slow uptrend with a daily wiggle."""
+    from vpa_trading import keylevels as K
+    days = pd.bdate_range("2025-01-02", periods=n)
+    idx = pd.DatetimeIndex([d + pd.Timedelta(minutes=480 + i) for d in days for i in range(0, 480, 5)])
+    k = np.arange(len(idx))
+    px = 100 + 0.002 * k + 2 * np.sin(k / 37.0)
+    m = pd.DataFrame({"open": px, "high": px + 0.3, "low": px - 0.3, "close": px, "volume": 1000.0, "vwap": px}, index=idx)
+    return K, m, days
+
+
+def test_key_levels_use_nothing_from_the_day_itself():
+    """Levels for a day must not change when that day's regular-session bars (and every later day) are removed."""
+    K, m, days = _ctx_days()
+    d = days[230]
+    full = K.Context(m)
+    cut = m[(m.index < d + pd.Timedelta(hours=9, minutes=30))]                # history + that day's premarket only
+    part = K.Context(cut, today=d)
+    a = sorted(full.raw(full.index_of(d), opening_range=False))
+    b = sorted(part.raw(part.index_of(d), opening_range=False))
+    drop = lambda xs: [(round(p, 4), k) for p, k in xs if not k.startswith("round")]   # round numbers hang off the reference price
+    assert drop(a) == drop(b) and len(a) > 20
+
+
+def test_key_level_basics_and_zone_scoring():
+    K, m, days = _ctx_days()
+    c = K.Context(m)
+    i = c.index_of(days[230])
+    raw = dict((k, p) for p, k in c.raw(i))
+    rth = m[(m.index.time >= pd.Timestamp("09:30").time())]
+    y = rth[rth.index.normalize() == days[229]]
+    assert raw["pd_high"] == y.high.max() and raw["pd_low"] == y.low.min() and raw["pd_close"] == y.close.iloc[-1]
+    pre = m[(m.index.normalize() == days[230]) & (m.index.time < pd.Timestamp("09:30").time())]
+    assert raw["premkt_high"] == pre.high.max()
+    z = K.cluster([(100.0, "pd_high"), (100.05, "pw_high"), (100.08, "round"), (103.0, "ema9"), (103.02, "ema21")], tol=0.1)
+    assert len(z) == 2 and z[0].score == 3.0 + 4.0 + 2.0 + 0.5 * 2           # three families stack
+    assert z[1].score == 2.0                                                 # two averages are one family: the best one counts
+    assert K.at(z, 100.2, 0.15) is z[0] and K.at(z, 101.5, 0.15) is None
+    up, dn = K.select(z, 101.0, adr=2.0)
+    assert [x.mid for x in up] == [z[1].mid] and [x.mid for x in dn] == [z[0].mid]
+
+
+def test_zone_at_from_the_sheet_adds_the_live_opening_range():
+    from vpa_trading import keylevels as K
+    sheet = pd.DataFrame([dict(sym="TSLA", price=384.0, kind="pw_low", tol=0.5, adr=13.0, spot=380.0),
+                          dict(sym="TSLA", price=384.2, kind="gap_edge", tol=0.5, adr=13.0, spot=380.0),
+                          dict(sym="TSLA", price=377.0, kind="or_high", tol=0.5, adr=13.0, spot=380.0)])
+    assert K.zone_at(sheet, "TSLA", 384.3) .families == ["gap", "week"]
+    assert K.zone_at(sheet, "TSLA", 377.0) is None                           # the sheet's own (stale) opening range is ignored
+    assert K.zone_at(sheet, "TSLA", 379.1, opening_range=(379.0, 372.0)).kinds == ["or_high"]
+    assert K.zone_at(sheet, "AAPL", 384.0) is None and K.zone_at(None, "TSLA", 384.0) is None
