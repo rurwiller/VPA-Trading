@@ -4,8 +4,10 @@ Standard dealer convention: customers are assumed net long calls and net short p
 (positive gamma to them is counted +) and long puts (counted -). Per contract:
     GEX ($ per 1% move) = gamma x open interest x 100 x spot^2 x 0.01, calls +, puts -
 Levels:
-    call wall   strike with the largest call GEX (resistance)
-    put wall    strike with the largest put GEX (support)
+    call wall   strike AT OR ABOVE spot with the largest call GEX (resistance)
+    put wall    strike AT OR BELOW spot with the largest put GEX (support)
+                (until Nov 10 any strike within +-25% counted: after NVDA fell from the 190s, the old open interest put its
+                "put wall" at 190 with the stock at 170, above price, where it cannot be support)
     gamma flip  spot price where total GEX crosses zero (gamma re-computed with Black-Scholes at each test price);
                 above it dealers are long gamma (moves get damped), below it short gamma (moves get amplified)
     net GEX     total at the current price, in $ millions per 1% move
@@ -98,6 +100,7 @@ def levels(sym: str, now: pd.Timestamp | None = None, max_days: int = 30) -> dic
     calls = by.get("call", pd.Series(dtype=float))
     puts = by.get("put", pd.Series(dtype=float))
     net = by.sum(axis=1)
+    calls, puts = calls[calls.index >= S], puts[puts.index <= S]     # resistance above price, support below it
     grid = np.linspace(S * 0.9, S * 1.1, 81)
     tot = np.array([gex_at(c, x, now).sum() for x in grid])
     cross = np.flatnonzero(np.sign(tot[:-1]) != np.sign(tot[1:]))

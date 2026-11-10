@@ -209,3 +209,16 @@ def test_terrashade_parse_real_autopost_card():
          "[Open TSLA on TerraShade](https://terrashade.onrender.com/?t=TSLA)"}]}
     assert parse(m, {"TSLA", "QQQ"}) == {"TSLA": {"spot": 374.92, "king node": 400.0, "call wall": 400.0,
                                                    "put wall": 350.0, "zero gamma": 358.31}}
+
+
+def test_gex_walls_sit_on_the_right_side_of_price(monkeypatch):
+    """NVDA Nov 10: spot 170 after a drop, big leftover put open interest at 190. The put wall must be below price."""
+    from vpa_trading import gex as G
+    now = pd.Timestamp("2026-11-10 11:00")
+    rows = [("put", 190, 115_000), ("put", 170, 53_000), ("put", 165, 41_000), ("call", 200, 130_000), ("call", 175, 4_500),
+            ("call", 160, 20_000)]
+    c = pd.DataFrame([{"symbol": f"{t}{k}", "type": t, "strike": float(k), "expiry": pd.Timestamp("2026-11-20"), "oi": float(oi),
+                       "iv": 0.72, "spot": 170.0} for t, k, oi in rows])
+    monkeypatch.setattr(G, "chain", lambda sym, now, max_days=30: c)
+    lv = G.levels("NVDA", now)
+    assert lv["put_wall"] == 170.0 and lv["call_wall"] == 200.0
