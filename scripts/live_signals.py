@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vpa_trading import gex as GX, live as LV  # noqa: E402
 from vpa_trading.alert import AlertMode  # noqa: E402
 from vpa_trading.noise_band import NoiseBand  # noqa: E402
+from vpa_trading.terrashade import TerraShadeFeed  # noqa: E402
 
 MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
@@ -170,6 +171,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
         print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
     gex_levels: dict = {}
     gex_at = None
+    ts = TerraShadeFeed(sorted(set(cfg.symbols) | set(breakout)))
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
     while True:
         now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
@@ -181,6 +183,13 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
         if gex_at is None or boundary - gex_at >= pd.Timedelta(minutes=30):
             refresh_gex(cfg, gex_levels, boundary)
             gex_at = boundary
+        try:
+            n_ts = ts.refresh(boundary)
+            if n_ts:
+                print(f"[{mst(boundary)} MST] TerraShade (Discord): new levels for " + ", ".join(
+                    f"{k} {', '.join(f'{a} {b}' for a, b in v.items() if a not in ('asof', 'channel'))}" for k, v in ts.levels.items()), flush=True)
+        except Exception as e:      # optional data: never stop the scanner
+            print(f"TerraShade feed error: {e}", flush=True)
         today = LV.fetch_bars(sorted(set(cfg.symbols) | set(breakout)), boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
         eng.external = {nb.sym: nb.pos for nb in nbs}   # the candle scanner may add to the breakout's direction, never oppose it
         for q in aeng.plans:
@@ -218,6 +227,8 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
             for p in eng.signals(sym, m, boundary):
                 eng.plans.append(p)
                 tag_gex(p, gex_levels, m)
+                if ts.tag(p.sym):
+                    p.gex["terrashade"] = ts.tag(p.sym)
                 announce(p)
                 if paper:
                     eng.submit(p)
@@ -231,6 +242,8 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
                 elif ok:
                     why = "alert only"
                 tag_gex(p, gex_levels, m)
+                if ts.tag(p.sym):
+                    p.gex["terrashade"] = ts.tag(p.sym)
                 announce_alert(p, why)
                 aeng.log("signal", p)
         time.sleep(max(1.0, 65 - (pd.Timestamp.now(tz="America/New_York").tz_localize(None) - boundary).total_seconds()))
