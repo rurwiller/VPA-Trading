@@ -17,6 +17,11 @@ Half at +0.5R (Config.half_at, 0 = off): once the entry fills, the bracket's two
   expectancy as all-at-1R, profitable trades 49% -> 65%.
 Session times come from Alpaca's calendar (close_minute): last entry 30 minutes before the close, flat 10 minutes before,
   so a 13:00 half day is handled (12:30 / 12:50).
+Key levels (Nov 10, the user's call, $300 risk): a PREMIER candle on volume 2x usual or more whose wick is at a zone of the
+  morning key-levels sheet (logs/keylevels/, vpa_trading/keylevels.py) scoring 7 or more is traded even with no gap and
+  no Banks level. Marked: prefix "key-", printed as "KEY LEVEL ALERT", strategy "Key level" in the report. Evidence is
+  thin: +0.11R a trade since Nov 2024 (105 trades) but -0.05R before (reports/keylevels.md). A signal at a gap or a
+  Banks level stays that kind of trade (with the key zone as a tag).
 Buying power (Nov 10, the user's call): an entry Alpaca refuses for buying power is sent again at the size that fits
   (same stop and target, so less at risk); skipped if under a quarter of the planned size fits. Logged as shrunk_from.
 Banks levels (Nov 10, the user's call): a PREMIER candle whose wick is at a posted level (data/levels/, within 0.25 ATR(5m))
@@ -162,6 +167,9 @@ class Config:
     require_pivot: bool = True      # the signal candle's wick must be the extreme of the last `pivot_bars` candles
     pivot_bars: int = 12
     long_min_rvol: float = 3.0      # bullish signals only on extremely high volume (time-of-day relative volume)
+    key_risk_usd: float = 300.0     # risk on a trade taken only because of a key-levels zone (0 = off)
+    key_min_score: float = 7.0
+    key_min_rvol: float = 2.0
     max_adds: int = 1               # extra positions on a symbol that is already in a trade (same direction only)
     add_risk_usd: float = 0.0       # risk of an add in dollars; 0 = the same as risk_usd
     half_at: float = 0.5            # take half off at this many R, then the rest goes to breakeven; 0 = all at the target
@@ -208,6 +216,7 @@ class Engine:
         self.busy: set[str] = set()          # symbols with an open position / order at Alpaca (restart safety)
         self.external: dict[str, int] = {}   # symbols held by another strategy (the breakout) -> its direction
         self.levels: pd.DataFrame | None = None   # posted levels (vpa_trading.levels.load); premier candles at one may trade
+        self.key_sheet: pd.DataFrame | None = None  # the morning key-levels sheet (keylevels.load_sheet)
 
     # ---------------------------------------------------------------- signals
     def signals(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> list[Plan]:
@@ -279,19 +288,25 @@ class Engine:
                     gaps = self._gaps(sym, m1, now)
                 gap = self._at_gap(gaps, wick, bias, a5)
                 lvl = self._at_level(sym, wick, bias, a5) if gap == "-" and fam == "premier" else None
-                if self.cfg.require_gap and gap == "-" and lvl is None:
+                key = self._at_key(sym, m1, now, tf, wick, done) if gap == "-" and lvl is None and fam == "premier" else None
+                if self.cfg.require_gap and gap == "-" and lvl is None and key is None:
                     continue
                 if bias < 0 and self.cfg.short_trend_filter:
                     why = self._uptrend(m1, b5, now)
                     if why:
                         print(f"[{(now - pd.Timedelta(hours=2)).strftime('%H:%M')} MST] {sym} {tf} {typ} short skipped: {why}", flush=True)
                         continue
-                p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap,
-                               risk_usd=(self.cfg.add_risk_usd or self.cfg.risk_usd) if add_dir is not None else None)
+                risk_usd = (self.cfg.add_risk_usd or self.cfg.risk_usd) if add_dir is not None else None
+                if key is not None:
+                    risk_usd = self.cfg.key_risk_usd
+                p = self._plan(sym, tf, fam, typ, bias, now, hi, lo, wick, gap, risk_usd=risk_usd)
                 if p:
                     p.tags = self._tags(sym, m1, now, wick, bias, a5, gaps)
                     if lvl:                  # traded only because of a posted level: marked as its own strategy
                         p.gap, p.extra["prefix"], p.tags["banks_level"] = "level", "lvl", lvl
+                    elif key is not None:    # traded only because of a key-levels zone
+                        p.gap, p.extra["prefix"] = "key", "key"
+                        p.tags["key_level"] = {"zone": key.price(), "score": key.score, "what": key.label(4)}
                     if add_dir is not None:
                         p.tags["add"] = True
                         p.extra["add"] = True
@@ -350,6 +365,19 @@ class Engine:
             d["atr"] = ind.atr(d)
             g["D"] = live_gaps(d, m1, GAP_SESSIONS["D"], now)
         return g
+
+    def _at_key(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp, tf: str, wick: float, done: pd.DataFrame):
+        """The key-levels zone (score >= key_min_score) at the wick, if the candle's volume is >= key_min_rvol x usual."""
+        if self.key_sheet is None or not self.cfg.key_risk_usd:
+            return None
+        if not float(vpa.relvol_tod(done).iat[-1]) >= self.cfg.key_min_rvol:
+            return None
+        from .keylevels import zone_at
+        day = m1[m1.index.normalize() == now.normalize()]
+        f30 = day[day.index.time < pd.Timestamp("10:00").time()]
+        late = now - pd.Timedelta(tf.replace("m", "min")) >= now.normalize() + pd.Timedelta(hours=10)
+        z = zone_at(self.key_sheet, sym, wick, (float(f30.high.max()), float(f30.low.min())) if late and len(f30) else None)
+        return z if z is not None and z.score >= self.cfg.key_min_score else None
 
     LONG_ROLES = ("support", "long_trigger", "target_down")
     SHORT_ROLES = ("resistance", "short_trigger", "target_up")
@@ -587,7 +615,7 @@ class Engine:
         would never be cancelled when their window ends and could fill hours later). Filled positions keep their brackets."""
         n = 0
         for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json():
-            if o["client_order_id"].startswith(("vpa-", "alert-", "lvl-")) and not o["client_order_id"].endswith(PART) \
+            if o["client_order_id"].startswith(("vpa-", "alert-", "lvl-", "key-")) and not o["client_order_id"].endswith(PART) \
                     and o.get("order_class") != "oco" and o.get("filled_qty") in (None, "0"):
                 requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
                 n += 1
@@ -630,7 +658,7 @@ class Engine:
         cls.nb_net = {k: int(round(v)) for k, v in net.items()}
         for o in orders:
             cid = o["client_order_id"]
-            if not cid.startswith(("vpa-", "alert-", "lvl-")) or cid.endswith(PART) or o.get("order_class") != "bracket" \
+            if not cid.startswith(("vpa-", "alert-", "lvl-", "key-")) or cid.endswith(PART) or o.get("order_class") != "bracket" \
                     or o.get("status") != "filled":
                 continue
             try:

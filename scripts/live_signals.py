@@ -46,7 +46,9 @@ def mst(t: pd.Timestamp) -> str:
 
 def announce(p: LV.Plan) -> None:
     side = "SHORT below" if p.side < 0 else "LONG above"
-    where = f"LEVEL ALERT at {p.tags['banks_level']}" if p.tags.get("banks_level") else f"at {p.gap} gap"
+    where = f"LEVEL ALERT at {p.tags['banks_level']}" if p.tags.get("banks_level") else \
+        f"KEY LEVEL ALERT at {p.tags['key_level']['zone']} score {p.tags['key_level']['score']:g} ({p.tags['key_level']['what']})" \
+        if p.tags.get("key_level") else f"at {p.gap} gap"
     print(f"[{mst(p.signal_close)} MST] {p.sym} {p.tf} {p.type} {where} -> {side} {p.entry:.2f}, "
           f"stop {p.stop:.2f}, target {p.target:.2f}, qty {p.qty} (valid until {mst(p.valid_until)})"
           + (" | ADD to the open position" if p.extra.get("add") else "")
@@ -265,7 +267,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     if len(posted):
         print(f"Posted levels loaded: {len(posted)} from {', '.join(sorted(posted.source.unique()))} "
               f"({', '.join(sorted(posted.sym.unique()))})", flush=True)
-    st["sheet"] = KL.load_sheet(now)
+    st["sheet"] = eng.key_sheet = KL.load_sheet(now)     # tags every signal; 2x-volume candles at a 7+ zone trade ("key-")
     print("Key levels sheet: " + (f"{len(st['sheet'])} levels for {st['sheet'].sym.nunique()} tickers" if st["sheet"] is not None
                                   else "not made today (run scripts/key_levels.py); signals get no key-zone tag"), flush=True)
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)

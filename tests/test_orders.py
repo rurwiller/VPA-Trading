@@ -221,3 +221,10 @@ def test_breakout_entry_skipped_when_almost_nothing_fits(api, tmp_path):
     nb, up, t = nb_at_check(tmp_path, 0)
     nb.on_minute(up, t, blocked=False)
     assert nb.pos == 0 and not any(api.pos.values())
+
+
+def test_key_level_trades_get_the_half_exits_too(api):
+    cid = "key-TSLA-15m-202611101500"
+    api.bracket(cid, "TSLA", "sell", 60, 384.0, 389.0, 379.0)
+    LV.Engine.manage_partials(0.5)
+    assert api.by_cid(cid + "-h1")["limit_price"] == "381.50" and api.by_cid(cid + "-h2")["qty"] == "30"

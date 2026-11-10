@@ -280,3 +280,22 @@ def test_zone_at_from_the_sheet_adds_the_live_opening_range():
     assert K.zone_at(sheet, "TSLA", 377.0) is None                           # the sheet's own (stale) opening range is ignored
     assert K.zone_at(sheet, "TSLA", 379.1, opening_range=(379.0, 372.0)).kinds == ["or_high"]
     assert K.zone_at(sheet, "AAPL", 384.0) is None and K.zone_at(None, "TSLA", 384.0) is None
+
+
+def test_key_zone_trade_needs_volume_and_a_strong_zone(monkeypatch):
+    from vpa_trading import live as L
+    e = eng()
+    e.key_sheet = pd.DataFrame([dict(sym="X", price=p, kind=k, tol=0.05, adr=2.0, spot=100.0) for p, k in
+                                ((100.0, "pw_high"), (100.02, "pd_high"), (100.03, "round"), (98.0, "pd_low"))])
+    m = pd.DataFrame({"open": 99.0, "high": 99.5, "low": 98.5, "close": 99.0, "volume": 1.0},
+                     index=pd.date_range("2026-11-10 09:30", periods=60, freq="min"))
+    now = pd.Timestamp("2026-11-10 10:30")
+    monkeypatch.setattr(L.vpa, "relvol_tod", lambda b: pd.Series([2.5]))
+    z = e._at_key("X", m, now, "15m", 100.01, m)
+    assert z is not None and z.score >= 7                      # three families stack at 100: 4 + 3 + 2 + 1
+    assert e._at_key("X", m, now, "15m", 98.0, m) is None      # a lone prior-day low scores 3: too weak
+    monkeypatch.setattr(L.vpa, "relvol_tod", lambda b: pd.Series([1.5]))
+    assert e._at_key("X", m, now, "15m", 100.01, m) is None    # volume under 2x
+    e.cfg.key_risk_usd = 0
+    monkeypatch.setattr(L.vpa, "relvol_tod", lambda b: pd.Series([2.5]))
+    assert e._at_key("X", m, now, "15m", 100.01, m) is None    # turned off
