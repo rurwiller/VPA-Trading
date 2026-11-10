@@ -183,6 +183,30 @@ def fetch_today(syms: list[str], boundary: pd.Timestamp) -> dict:
     return today
 
 
+def log_buying_power(boundary: pd.Timestamp) -> None:
+    """One row a minute: Alpaca's buying power next to what is open (positions, and open orders by side and kind), to work
+    out how resting exit orders and waiting entries use it (13:00 MST rejections on Nov 10). Logging only."""
+    try:
+        a = requests.get(LV.TRADE + "/account", headers=LV.headers(), timeout=30).json()
+        pos = requests.get(LV.TRADE + "/positions", headers=LV.headers(), timeout=30).json()
+        oo = requests.get(LV.TRADE + "/orders", headers=LV.headers(), params={"status": "open", "nested": "true"}, timeout=30).json()
+        row = {"time": boundary, **{k: a.get(k) for k in ("equity", "last_equity", "buying_power", "regt_buying_power",
+                                                           "initial_margin", "maintenance_margin")},
+               "long_mv": sum(float(x["market_value"]) for x in pos if float(x["qty"]) > 0),
+               "short_mv": sum(-float(x["market_value"]) for x in pos if float(x["qty"]) < 0)}
+        for o in oo:
+            for y in [o] + (o.get("legs") or []):
+                if y.get("status") not in LV.OPEN:
+                    continue
+                px = float(y.get("limit_price") or y.get("stop_price") or 0)
+                key = f"open_{y['side']}_{'entry' if o['order_class'] == 'bracket' and y is o else 'exit'}"
+                row[key] = row.get(key, 0.0) + px * float(y["qty"])
+        out = Path("logs/live") / f"bp_{boundary:%Y-%m-%d}.csv"
+        pd.DataFrame([row]).to_csv(out, mode="a", header=not out.exists(), index=False)
+    except Exception as e:      # logging only
+        print(f"buying power log failed: {e}", flush=True)
+
+
 def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True,
          osc_trim: tuple | None = (80.0, 0.5), max_daily_loss: float = 0.0) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
@@ -295,6 +319,7 @@ def minute_step(cfg, paper, boundary, syms, hist, eng, aeng, alert, nbs, ts, pos
         except Exception as e:      # never let the breakout stop the scanner
             print(f"NB {nb.sym} error: {e}", flush=True)
     if paper:
+        log_buying_power(boundary)
         eng.refresh_busy()               # never double up after a restart
         try:
             LV.Engine.manage_partials(cfg.half_at)     # half at +0.5R, then breakeven (candle and alert trades)
