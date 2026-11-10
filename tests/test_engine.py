@@ -199,3 +199,13 @@ def test_level_must_fit_the_direction():
     assert e._at_level("TSLA", 383.2, -1, 1.0) == "jgbanks resistance 383"
     assert e._at_level("TSLA", 380.0, 1, 1.0) is None                          # nowhere near a level
     assert eng()._at_level("TSLA", 376.2, 1, 1.0) is None                      # no levels loaded
+
+
+def test_terrashade_parse_real_autopost_card():
+    """The first real card, Nov 10 9:45 ET (#terrashade-heatmap)."""
+    m = {"content": "", "embeds": [{"title": "TSLA · Levels", "description":
+         "**TSLA** · 9:45 AM ET\nSpot **374.92**\nKing Node **400.00** (+6.69% from spot)\nCall wall **400.00** (+6.69% from spot)\n"
+         "Put wall **350.00** (-6.65% from spot)\nZero gamma **358.31** (-4.43% from spot)\n"
+         "[Open TSLA on TerraShade](https://terrashade.onrender.com/?t=TSLA)"}]}
+    assert parse(m, {"TSLA", "QQQ"}) == {"TSLA": {"spot": 374.92, "king node": 400.0, "call wall": 400.0,
+                                                   "put wall": 350.0, "zero gamma": 358.31}}

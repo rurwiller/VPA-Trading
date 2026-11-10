@@ -3,8 +3,8 @@
 TerraShade's terms ban scraping the site and its API, but they offer a Discord bot that posts a levels card after the open
 and after the close (`/autopost`). The TerraShade bot posts into two channels in the user's server; our own read-only bot
 (token stored as a network secret for discord.com, injected by the proxy) reads those channels:
-  #terrashade-heatmap   morning and close options cards
-  #terrashade-alerts    levels for TSLA, AAPL and QQQ
+  #terrashade-heatmap   the levels cards (TSLA, AAPL, QQQ at 9:45 ET and after the close; first seen Nov 10)
+  #terrashade-alerts    only the welcome message so far
 The scanner reads both channels every 10 minutes (two small requests), keeps every new post raw in logs/terrashade/<date>.jsonl
 and tags each signal with the latest levels for its ticker. Logged only, never a filter.
 """
@@ -23,6 +23,8 @@ TICKER = re.compile(r"\b([A-Z]{1,5}[WP]?)\b")
 NUM = r"\$?(-?\d[\d,]*\.?\d*)"
 # "Call wall: 400", "Put Wall 380", "Gamma flip — 383.0", "Zero gamma: 381", "Max pain: 390", "Vanna wall ..." etc.
 LEVEL = re.compile(r"([A-Za-z][A-Za-z +/\-]{1,30}?)\s*[:=—–\-|]\s*" + NUM)
+# the real autopost card (Nov 10): "Call wall **400.00** (+6.69% from spot)", "Zero gamma **358.31** ...", "Spot **374.92**"
+LINE = re.compile(r"^\s*([A-Za-z][A-Za-z ]{1,30}?)\s*[:=—–|]?\s*" + NUM + r"(?!\s*%)")
 
 
 def _text(m: dict) -> list[str]:
@@ -44,7 +46,8 @@ def parse(m: dict, known: set[str]) -> dict[str, dict]:
                 cur = hits[0]
             if cur is None:
                 continue
-            for lab, val in LEVEL.findall(line):
+            m0 = LINE.match(line)
+            for lab, val in ([m0.groups()] if m0 else LEVEL.findall(line)):
                 lab = lab.strip().lower()
                 if lab in {t.lower() for t in known}:
                     continue
