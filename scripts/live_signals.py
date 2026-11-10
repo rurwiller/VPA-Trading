@@ -45,7 +45,8 @@ def mst(t: pd.Timestamp) -> str:
 
 def announce(p: LV.Plan) -> None:
     side = "SHORT below" if p.side < 0 else "LONG above"
-    print(f"[{mst(p.signal_close)} MST] {p.sym} {p.tf} {p.type} at {p.gap} gap -> {side} {p.entry:.2f}, "
+    where = f"LEVEL ALERT at {p.tags['banks_level']}" if p.tags.get("banks_level") else f"at {p.gap} gap"
+    print(f"[{mst(p.signal_close)} MST] {p.sym} {p.tf} {p.type} {where} -> {side} {p.entry:.2f}, "
           f"stop {p.stop:.2f}, target {p.target:.2f}, qty {p.qty} (valid until {mst(p.valid_until)})"
           + (" | ADD to the open position" if p.extra.get("add") else "")
           + (f" | tags: EMA {'+'.join(p.tags['near_ema']) or '-'}, gaps {'+'.join(p.tags['gap_tfs']) or '-'}"
@@ -132,6 +133,7 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
             print(f"NB {sym} still {'long' if nb.pos > 0 else 'short'} at the close {px:.2f}: approx P&L "
                   f"{(px - nb.entry) * nb.pos * nb.qty:+.2f}")
     eng = LV.Engine(cfg, hist, daily)
+    eng.levels = LVL.load(d)
     aeng = LV.Engine(replace(cfg, risk_usd=alert_risk, families=("premier",), require_gap=False), hist, daily) if alert_risk else None
     alert = AlertMode(aeng) if aeng else None
     for sym in cfg.symbols:
@@ -218,6 +220,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     st = {"gex": {}, "gex_at": None, "boundary": now.floor("min")}
     ts = TerraShadeFeed(syms)
     posted = LVL.load(now)
+    eng.levels = posted                  # premier candles at a posted level trade even without a gap ("lvl-")
     if len(posted):
         print(f"Posted levels loaded: {len(posted)} from {', '.join(sorted(posted.source.unique()))} "
               f"({', '.join(sorted(posted.sym.unique()))})", flush=True)

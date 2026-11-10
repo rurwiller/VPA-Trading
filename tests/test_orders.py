@@ -166,3 +166,10 @@ def test_breakout_exits_but_does_not_reverse_into_the_scanners_add(api, tmp_path
     nb, up, t = nb_at_check(tmp_path, -1)
     nb.on_minute(up, t, blocked=True)                # price is now above the upper band: the rule says long
     assert nb.pos == 0 and api.pos["TSLA"] == -40    # our 100 are covered, the scanner's 40 short are untouched
+
+
+def test_level_trades_get_the_half_exits_too(api):
+    cid = "lvl-TSLA-9m-202611101015"
+    api.bracket(cid, "TSLA", "buy", 100, 376.0, 375.0, 377.0)
+    LV.Engine.manage_partials(0.5)
+    assert api.by_cid(cid + "-h1")["limit_price"] == "376.50" and api.by_cid(cid + "-h2")["qty"] == "50"

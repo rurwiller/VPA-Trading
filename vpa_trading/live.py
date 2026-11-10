@@ -17,6 +17,11 @@ Half at +0.5R (Config.half_at, 0 = off): once the entry fills, the bracket's two
   expectancy as all-at-1R, profitable trades 49% -> 65%.
 Session times come from Alpaca's calendar (close_minute): last entry 30 minutes before the close, flat 10 minutes before,
   so a 13:00 half day is handled (12:30 / 12:50).
+Banks levels (Nov 10, the user's call): a PREMIER candle whose wick is at a posted level (data/levels/, within 0.25 ATR(5m))
+  is traded even with no 1h / 4h / D gap, if the level fits the direction: a bottom candle at support / long trigger /
+  downside target, a top candle at resistance / short trigger / upside target. Every other filter still applies (pivot,
+  volume for longs), same risk and exits. Marked: client id prefix "lvl-", printed as "LEVEL ALERT", strategy
+  "Banks level" in the end-of-day report. Untested: there is no history of these levels yet.
 Volume (relative volume, climaxes) uses the same feed for history and today, so the IEX feed is used live
 (real-time on the free plan); replay uses SIP history.
 """
@@ -200,6 +205,7 @@ class Engine:
         self.seen: set = set()
         self.busy: set[str] = set()          # symbols with an open position / order at Alpaca (restart safety)
         self.external: dict[str, int] = {}   # symbols held by another strategy (the breakout) -> its direction
+        self.levels: pd.DataFrame | None = None   # posted levels (vpa_trading.levels.load); premier candles at one may trade
 
     # ---------------------------------------------------------------- signals
     def signals(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> list[Plan]:
@@ -270,7 +276,8 @@ class Engine:
                 if gaps is None:
                     gaps = self._gaps(sym, m1, now)
                 gap = self._at_gap(gaps, wick, bias, a5)
-                if self.cfg.require_gap and gap == "-":
+                lvl = self._at_level(sym, wick, bias, a5) if gap == "-" and fam == "premier" else None
+                if self.cfg.require_gap and gap == "-" and lvl is None:
                     continue
                 if bias < 0 and self.cfg.short_trend_filter:
                     why = self._uptrend(m1, b5, now)
@@ -281,6 +288,8 @@ class Engine:
                                risk_usd=(self.cfg.add_risk_usd or self.cfg.risk_usd) if add_dir is not None else None)
                 if p:
                     p.tags = self._tags(sym, m1, now, wick, bias, a5, gaps)
+                    if lvl:                  # traded only because of a posted level: marked as its own strategy
+                        p.gap, p.extra["prefix"], p.tags["banks_level"] = "level", "lvl", lvl
                     if add_dir is not None:
                         p.tags["add"] = True
                         p.extra["add"] = True
@@ -339,6 +348,18 @@ class Engine:
             d["atr"] = ind.atr(d)
             g["D"] = live_gaps(d, m1, GAP_SESSIONS["D"], now)
         return g
+
+    LONG_ROLES = ("support", "long_trigger", "target_down")
+    SHORT_ROLES = ("resistance", "short_trigger", "target_up")
+
+    def _at_level(self, sym: str, px: float, bias: int, a5: float) -> str | None:
+        """Label of the closest posted level at the wick that fits the direction, else None."""
+        if self.levels is None or not len(self.levels):
+            return None
+        from .levels import near
+        roles = self.LONG_ROLES if bias > 0 else self.SHORT_ROLES
+        hits = [h for h in near(self.levels, sym, px, 0.25 * a5) if h["role"] in roles]
+        return f"{hits[0]['source']} {hits[0]['role'].replace('_', ' ')} {hits[0]['level']}" if hits else None
 
     @staticmethod
     def _at_gap(gaps: dict, px: float, bias: int, a5: float) -> str:
@@ -536,7 +557,7 @@ class Engine:
         would never be cancelled when their window ends and could fill hours later). Filled positions keep their brackets."""
         n = 0
         for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json():
-            if o["client_order_id"].startswith(("vpa-", "alert-")) and not o["client_order_id"].endswith(PART) \
+            if o["client_order_id"].startswith(("vpa-", "alert-", "lvl-")) and not o["client_order_id"].endswith(PART) \
                     and o.get("order_class") != "oco" and o.get("filled_qty") in (None, "0"):
                 requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
                 n += 1
@@ -579,7 +600,7 @@ class Engine:
         cls.nb_net = {k: int(round(v)) for k, v in net.items()}
         for o in orders:
             cid = o["client_order_id"]
-            if not cid.startswith(("vpa-", "alert-")) or cid.endswith(PART) or o.get("order_class") != "bracket" \
+            if not cid.startswith(("vpa-", "alert-", "lvl-")) or cid.endswith(PART) or o.get("order_class") != "bracket" \
                     or o.get("status") != "filled":
                 continue
             try:

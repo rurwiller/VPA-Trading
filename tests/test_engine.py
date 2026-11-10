@@ -188,3 +188,14 @@ def test_breakout_skips_a_check_on_stale_data(tmp_path):
     t = nb.day + pd.Timedelta(hours=10)
     nb.on_minute(day[day.index < t - pd.Timedelta(minutes=10)], t, blocked=False)
     assert nb.pos == 0
+
+
+def test_level_must_fit_the_direction():
+    e = eng()
+    e.levels = pd.DataFrame([{"date": "2026-11-09", "source": "jgbanks", "sym": "TSLA", "lo": 374, "hi": 377, "role": "support", "note": ""},
+                             {"date": "2026-11-09", "source": "jgbanks", "sym": "TSLA", "lo": 383, "hi": 383, "role": "resistance", "note": ""}])
+    assert e._at_level("TSLA", 376.2, 1, 1.0) == "jgbanks support 374-377"      # bottom candle at support: yes
+    assert e._at_level("TSLA", 376.2, -1, 1.0) is None                         # top candle at support: no
+    assert e._at_level("TSLA", 383.2, -1, 1.0) == "jgbanks resistance 383"
+    assert e._at_level("TSLA", 380.0, 1, 1.0) is None                          # nowhere near a level
+    assert eng()._at_level("TSLA", 376.2, 1, 1.0) is None                      # no levels loaded
