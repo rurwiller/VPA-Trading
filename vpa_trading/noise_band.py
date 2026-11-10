@@ -23,6 +23,8 @@
             long, <= 20 while short) AFTER the entry, while the trade is in profit, half of the original size is sold at
             market. That trim replaces the next profit level, and the stop on what is left moves to breakeven. 5-year TSLA
             test (reports/trim_test.md): about the same profit, smoother days (Sharpe since Nov 2024 0.56 -> 0.67).
+  buying    an entry Alpaca refuses for buying power is resent at the size that fits (skipped under a quarter of the
+  power     planned size); the thirds, trims and stops then follow the shares actually bought.
   conflicts one net position per symbol at Alpaca, so the breakout never opens against shares another strategy holds
             (candle scanner, alert mode, a position from before a restart). If it is in a trade and the rule says
             reverse while the scanner holds an add in the old direction, it only exits.
@@ -33,6 +35,7 @@ State (position, remaining qty, tranches) is kept in logs/live/nb_<SYM>_<date>.j
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -304,10 +307,34 @@ class NoiseBand:
                 "client_order_id": f"nb-{self.sym}-{tag}-{pd.Timestamp.now():%Y%m%d%H%M%S}", **extra}
         body.setdefault("type", "market")
         r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
+        if not r.ok and tag == "entry" and "insufficient buying power" in r.text:
+            r = self._shrink_to_fit(body, qty, r)
+            if r is None:
+                return None
         if not r.ok:
             self._log("order rejected", side=side, qty=qty, why=r.text[:200])
             return None
         return r.json()
+
+    MIN_FIT = 0.25      # shrink-to-fit: skip the entry if less than a quarter of the planned size fits
+
+    def _shrink_to_fit(self, body: dict, qty: int, r):
+        """An entry refused for buying power is resent at the size that fits (same rule as the candle scanner): the
+        reserve Alpaca reported per share, 2% to spare, skipped under a quarter of the planned size."""
+        try:
+            j = r.json()
+            per_share = float(j["cost_basis"]) / qty
+            q = int(0.98 * float(j["buying_power"]) // per_share)
+        except (ValueError, KeyError, TypeError, ZeroDivisionError):
+            return r
+        if q < max(1, math.ceil(self.MIN_FIT * qty)):
+            self._log("entry skipped: not enough buying power", qty=qty, fits=max(q, 0))
+            return None
+        r2 = requests.post(TRADE + "/orders", headers=headers(), json=dict(body, qty=str(q),
+                           client_order_id=body["client_order_id"] + "-fit"), timeout=30)
+        if r2.ok:
+            self._log("entry shrunk to fit the buying power", planned=qty, qty=q)
+        return r2
 
     @staticmethod
     def _wait_fill(o: dict | None, tries: int = 60) -> tuple[float | None, int]:

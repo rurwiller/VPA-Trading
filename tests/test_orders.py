@@ -203,3 +203,21 @@ def test_full_size_when_it_fits(api):
     e, p = entry_plan()
     e.submit(p)
     assert p.status == "submitted" and p.qty == 264 and "shrunk_from" not in p.extra
+
+
+def test_breakout_entry_shrinks_to_fit(api, tmp_path):
+    api.bp = 40_000                                  # room for about 380 of the planned 742 shares
+    nb, up, t = nb_at_check(tmp_path, 0)
+    nb.on_minute(up, t, blocked=False)               # price is above the band: the rule says long
+    o = next(o for o in api.parents() if o["client_order_id"].endswith("-entry-" + o["client_order_id"].split("-entry-")[1])
+             and o["client_order_id"].endswith("-fit"))
+    assert nb.pos == 1 and nb.qty == nb.orig_qty == int(o["qty"]) == api.pos["TSLA"]
+    assert 300 < nb.qty < 400
+    assert open_qty(api) == nb.qty                   # every share bought is protected
+
+
+def test_breakout_entry_skipped_when_almost_nothing_fits(api, tmp_path):
+    api.bp = 10_000
+    nb, up, t = nb_at_check(tmp_path, 0)
+    nb.on_minute(up, t, blocked=False)
+    assert nb.pos == 0 and not any(api.pos.values())

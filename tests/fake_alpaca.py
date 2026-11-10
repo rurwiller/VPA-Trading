@@ -88,7 +88,8 @@ class FakeAlpaca:
                                    type="stop", stop_price=b["stop_loss"]["stop_price"], status="held")]
             return Resp(o)
         px = float(b.get("stop_price") or 100.0)
-        if self.bp is not None and b.get("order_class") == "bracket" and int(b["qty"]) * px * 1.03 > self.bp:
+        entry = b.get("order_class") == "bracket" or "-entry-" in (b.get("client_order_id") or "")
+        if self.bp is not None and entry and int(b["qty"]) * px * 1.03 > self.bp:
             return Resp({"buying_power": f"{self.bp:.2f}", "code": 40310000, "cost_basis": f"{int(b['qty']) * px * 1.03:.2f}",
                          "message": "insufficient buying power"}, 403)
         o = self._new(client_order_id=b.get("client_order_id", f"x{next(self.n)}"), symbol=b["symbol"], side=b["side"],
