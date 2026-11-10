@@ -29,10 +29,11 @@ def strat_of(cid: str) -> str | None:
 
 def how(kind: str, cid: str) -> str:
     if kind == "limit":
-        return "profit target"
+        return "half at +0.5R" if cid.endswith("-h1") else "profit target"
     if kind == "stop":
-        return "stop"
-    for key, label in (("take", "profit taken at market"), ("manual", "sold by hand"), ("exit", "breakout exit rule"), ("fix-orphan", "duplicate order fixed")):
+        return "breakeven stop" if cid.endswith("-h3") else "stop"
+    for key, label in (("osctrim", "15m oscillator trim"), ("-hm", "closed at market (exit order rejected)"),
+                       ("take", "profit taken at market"), ("manual", "sold by hand"), ("exit", "breakout exit rule"), ("fix-orphan", "duplicate order fixed")):
         if key in cid:
             return label
     return "closed at flatten"

@@ -99,14 +99,14 @@ def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
              "flip": lv["flip"], "net_gex_musd": lv["net_gex_musd"], "spot": lv["spot"], "asof": lv["time"]}
 
 
-def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True) -> None:
+def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True, osc_trim: tuple | None = (80.0, 0.5)) -> None:
     d = pd.Timestamp(day)
     syms = sorted(set(cfg.symbols) | set(breakout))
     end = min(d + pd.Timedelta(days=1), pd.Timestamp.now(tz="America/New_York").tz_localize(None) - pd.Timedelta(minutes=20))
     hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), end, feed="sip")   # free plan: no SIP from the last 15 min
     daily = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=500), d, tf="1Day", feed="sip")
     for sym in breakout:
-        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit)
+        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit, osc_trim=osc_trim)
         nb.start_day(hist[sym], None, d)
         today = hist[sym][(hist[sym].index.normalize() == d) & (hist[sym].index.time < pd.Timestamp("16:00").time())]
         for t in today.index:
@@ -144,7 +144,7 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
         print(sa.to_string(index=False) if len(sa) else "no alerts")
 
 
-def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True) -> None:
+def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True, osc_trim: tuple | None = (80.0, 0.5)) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
@@ -164,7 +164,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
               f"${alert_risk:,.0f} risk per trade", flush=True)
     nbs = []
     for sym in breakout:
-        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit)
+        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit, osc_trim=osc_trim)
         nb.start_day(hist[sym], None, now.normalize())
         nbs.append(nb)
         print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
@@ -197,6 +197,10 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
                 print(f"NB {nb.sym} error: {e}", flush=True)
         if paper:
             eng.refresh_busy()               # never double up after a restart
+            try:
+                LV.Engine.manage_partials(cfg.half_at)     # half at +0.5R, then breakeven (candle and alert trades)
+            except Exception as e:
+                print(f"half exits error: {e}", flush=True)
         for sym in cfg.symbols:
             m = pd.concat([hist[sym][hist[sym].index.normalize() < boundary.normalize()], today.get(sym, pd.DataFrame())])
             m = m[m.index < boundary]
@@ -266,19 +270,23 @@ def main() -> None:
     ap.add_argument("--breakout", nargs="*", default=["TSLA"], help="symbols for the trend-day (noise band) breakout; none to disable")
     ap.add_argument("--no-breakout-exit", action="store_true", help="do not sell the breakout on an opposite high-volume pivot candle")
     ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
+    ap.add_argument("--half-at", type=float, default=0.5, help="candle and alert trades: take half off at this many R, then breakeven (0 = off)")
+    ap.add_argument("--no-breakout-trim", action="store_true", help="breakout: no 15m oscillator trim (half when it crosses 80/20 against)")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
     ap.add_argument("--flatten", action="store_true", help="cancel all paper orders, close all positions, print today's log")
     a = ap.parse_args()
     cfg = LV.Config(symbols=[s.upper() for s in a.symbols], tfs=tuple(a.tfs), families=tuple(a.families),
                     risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap, short_trend_filter=a.trend_filter,
-                    max_adds=a.max_adds, add_risk_usd=a.add_risk)
+                    max_adds=a.max_adds, add_risk_usd=a.add_risk, half_at=a.half_at)
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:
-        replay(cfg, a.replay, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit)
+        replay(cfg, a.replay, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit,
+               None if a.no_breakout_trim else (80.0, 0.5))
     else:
-        live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit)
+        live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit,
+               None if a.no_breakout_trim else (80.0, 0.5))
 
 
 if __name__ == "__main__":

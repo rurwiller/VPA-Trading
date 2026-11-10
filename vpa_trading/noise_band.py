@@ -19,6 +19,10 @@
             neutral to slightly positive at 3x, harmful at lower volume.
   breakeven as soon as the first third has taken its profit, the stop on every remaining third moves to the entry price
             (the trade can no longer lose); stops are re-placed right then.
+  osc trim  once per trade: when the 15m oscillator (closed candles) crosses into the zone against the position (>= 80 while
+            long, <= 20 while short) AFTER the entry, while the trade is in profit, half of the original size is sold at
+            market. That trim replaces the next profit level, and the stop on what is left moves to breakeven. 5-year TSLA
+            test (reports/trim_test.md): about the same profit, smoother days (Sharpe since Nov 2024 0.56 -> 0.67).
 State (position, remaining qty, tranches) is kept in logs/live/nb_<SYM>_<date>.json so a restart picks it up.
 """
 from __future__ import annotations
@@ -31,6 +35,7 @@ import pandas as pd
 import requests
 
 from .alert import pivot_wick
+from .willard_osc import willard_osc
 from .live import TRADE, frame, headers
 from . import vpa
 
@@ -55,9 +60,12 @@ def sigma_curve(hist: pd.DataFrame, day: pd.Timestamp, lookback: int = 14) -> pd
 
 
 class NoiseBand:
-    def __init__(self, sym: str, notional: float, log_dir: Path, paper: bool, exit_opposite: bool = True, exit_rvol: float = 3.0):
+    def __init__(self, sym: str, notional: float, log_dir: Path, paper: bool, exit_opposite: bool = True, exit_rvol: float = 3.0,
+                 osc_trim: tuple | None = (80.0, 0.5)):
         self.sym, self.notional, self.log_dir, self.paper = sym, notional, log_dir, paper
         self.exit_opposite, self.exit_rvol = exit_opposite, exit_rvol
+        self.osc_trim = osc_trim                  # (level, fraction of the original size) or None
+        self.osc_armed, self.osc_trimmed = False, False
         self.day = None
         self.sigma = pd.Series(dtype=float)
         self.prev_close = self.open = np.nan
@@ -77,6 +85,7 @@ class NoiseBand:
                                                   "guard_id": self.guard_id, "tranches": self.tranches,
                                                   "orig_qty": self.orig_qty, "taken_levels": self.taken_levels,
                                                   "breakeven": self.breakeven,
+                                                  "osc_armed": self.osc_armed, "osc_trimmed": self.osc_trimmed,
                                                   "done": sorted(self.done)}))
 
     @staticmethod
@@ -104,6 +113,7 @@ class NoiseBand:
             self.tranches = s.get("tranches", [])
             self.orig_qty = s.get("orig_qty") or (sum(t["qty"] for t in self.tranches) if self.tranches else self.qty)
             self.taken_levels, self.breakeven = s.get("taken_levels", 0), s.get("breakeven", False)
+            self.osc_armed, self.osc_trimmed = s.get("osc_armed", False), s.get("osc_trimmed", False)
             if "breakeven" not in s and self.pos:      # state from before breakeven stops existed
                 sz = [self.orig_qty // 3, self.orig_qty // 3, self.orig_qty - 2 * (self.orig_qty // 3)]
                 self.taken_levels = next((k for k in (0, 1, 2) if self.qty >= sum(sz[k:]) - 1), 0)
@@ -181,6 +191,48 @@ class NoiseBand:
                     return tf, round(rv, 1)
         return None
 
+    def _osc_check(self, full: pd.DataFrame, px: float, now: pd.Timestamp) -> None:
+        """The 15m oscillator auto-trim (see the module notes). Arms once the oscillator is out of the zone after the entry."""
+        b = frame(full, "15m")
+        done = b[b.closes_at <= now]
+        if len(done) < 30:
+            return
+        v = float(willard_osc(done).osc.iat[-1])
+        lvl, frac = self.osc_trim
+        against = v >= lvl if self.pos > 0 else v <= 100 - lvl
+        if not against:
+            if not self.osc_armed:
+                self.osc_armed = True
+                self._save()
+            return
+        if not self.osc_armed or (px - self.entry) * self.pos <= 0:
+            return
+        q = min(max(int(round((self.orig_qty or self.qty) * frac)), 1), self.qty)
+        if self.paper:
+            self._cancel_protection()
+            self._sync(now)
+            if not self.pos:
+                return
+            q = min(q, self.qty)
+            fill, f = self._wait_fill(self._order("sell" if self.pos > 0 else "buy", q, "osctrim"))
+            if not f:
+                self._log("15m oscillator trim not filled", time=now, qty=q)
+                self._attach(px, now)
+                return
+            px, q = fill, f
+        self.qty -= q
+        self.osc_trimmed, self.breakeven = True, True
+        self.taken_levels = min(len(SCALE_LEVELS), self.taken_levels + 1)    # the trim replaces the next profit level
+        self._log("15m oscillator trim", time=now, osc=round(v, 1), qty=q, px=px, entry=round(self.entry, 2),
+                  remaining=self.qty, approx_pnl=round((px - self.entry) * self.pos * q, 2))
+        if not self.paper:
+            self.scaled_pnl = getattr(self, "scaled_pnl", 0.0) + (px - self.entry) * self.pos * q
+        if self.qty <= 0:
+            self.pos, self.qty, self.tranches = 0, 0, []
+        else:
+            self._attach(px, now)
+        self._save()
+
     def on_minute(self, today: pd.DataFrame, now: pd.Timestamp, blocked: bool, full: pd.DataFrame | None = None) -> None:
         """Call once per minute with today's 1m bars closed before `now`. blocked = the candle scanner holds this symbol."""
         if not len(today):
@@ -201,6 +253,8 @@ class NoiseBand:
                 self._trade(0, float(today.close.iat[-1]), now)
                 self._save()
                 return
+        if self.pos and self.osc_trim and not self.osc_trimmed and full is not None:
+            self._osc_check(full, float(today.close.iat[-1]), now)
         minute = int((now - now.normalize()) / pd.Timedelta(minutes=1)) - 570
         if minute not in CHECK_MINUTES or minute in self.done:
             return
@@ -282,7 +336,13 @@ class NoiseBand:
         sizes = [orig // 3, orig // 3, orig - 2 * (orig // 3)]
         if not self.paper:
             self.tranches = [{"qty": sizes[i], "target": round(self.entry * (1 + self.pos * lv), 2), "open": i >= self.taken_levels}
-                             for i, lv in enumerate(SCALE_LEVELS)] + [{"qty": sizes[2], "target": None, "open": True}]
+                             for i, lv in enumerate(SCALE_LEVELS)]
+            left = self.qty
+            for t in self.tranches:
+                if t["open"]:
+                    t["qty"] = min(t["qty"], left)
+                    left -= t["qty"]
+            self.tranches.append({"qty": left, "target": None, "open": True})
             return
         self._cancel_protection()
         net = self._net_mine()
@@ -290,12 +350,12 @@ class NoiseBand:
         if have == 0:
             self.pos, self.qty, self.tranches = 0, 0, []
             return
-        last_q = min(sizes[2], have)
-        rest = have - last_q
         levels = list(range(self.taken_levels, len(SCALE_LEVELS)))
-        qs = [rest] if len(levels) == 1 else ([rest // 2, rest - rest // 2] if len(levels) == 2 else [])
-        if not levels:
-            last_q = have
+        qs, left = [], have
+        for i in levels:                    # each open profit level gets its third, the runner gets what is left
+            qs.append(min(sizes[i], left))
+            left -= qs[-1]
+        last_q = left
         self.tranches = []
         for i, q in zip(levels, qs):
             lv, target = SCALE_LEVELS[i], round(self.entry * (1 + self.pos * SCALE_LEVELS[i]), 2)
@@ -360,6 +420,7 @@ class NoiseBand:
                       entry=self.entry, approx_pnl=round(pnl, 2), bands=self.last_bands)
             self.pos, self.qty, self.tranches = 0, 0, []
             self.orig_qty, self.taken_levels, self.breakeven = 0, 0, False
+            self.osc_armed, self.osc_trimmed = False, False
         if want != 0:
             qty = int(self.notional // px)
             if self.paper:
@@ -370,5 +431,6 @@ class NoiseBand:
                 px, qty = fill, q     # adopt whatever filled, even partly
             self.pos, self.qty, self.entry, self.tranches = want, qty, px, []
             self.orig_qty, self.taken_levels, self.breakeven = qty, 0, False
+            self.osc_armed, self.osc_trimmed = False, False
             self._log("entry", time=now, px=px, qty=qty, side="long" if want > 0 else "short", bands=self.last_bands)
             self._attach(px, now)

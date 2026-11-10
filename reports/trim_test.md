@@ -71,3 +71,12 @@
 | half when the 15m osc turns against, then breakeven / 2R | -0.094 | -0.066 | 46% |
 
 29,441 trades that filled.
+
+## Live from Nov 10, 2026 (paper)
+
+- **TSLA breakout:** once per trade, when the 15m oscillator (closed candles) crosses to 80+ while long (20 or less while
+  short) after the entry and the trade is in profit, half of the original size is sold at market. That trim replaces the
+  next profit level, and the stop on the rest moves to breakeven. Turn it off with `--no-breakout-trim`.
+- **Candle and alert trades:** once the entry fills, the 1R bracket is swapped for two exits: half with a limit at +0.5R, half
+  at the 1R target, both with the original stop. When the first half fills, the second half's stop moves to the entry
+  price. `--half-at 0` turns it off. One-share trades keep the plain bracket.

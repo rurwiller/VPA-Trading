@@ -8,6 +8,11 @@ Order: bracket, entry = stop order one cent beyond the signal candle's opposite 
   its high), stop = one cent beyond the wick (+0.02%), target = +0.3% from the entry level (or 2R). Size = risk $ / stop
   distance. Cancelled if not filled within 2 signal candles or if price takes out the wick first. Entries 10:00-15:30 ET,
   one position per symbol; everything is cancelled and flattened at 15:50 ET.
+Half at +0.5R (Config.half_at, 0 = off): once the entry fills, the bracket's two legs are swapped for two OCO exit orders,
+  half the shares with a limit at +0.5R, the rest with the original target, both with the original stop (client ids
+  <entry id>-h1 / -h2). When -h1 takes its profit, -h2 is replaced by -h3 with its stop at the entry fill (breakeven).
+  Stateless (read back from Alpaca every minute), so it keeps working across restarts. 5-year test (reports/trim_test.md):
+  same expectancy as all-at-1R, profitable trades 49% -> 65%.
 Volume (relative volume, climaxes) uses the same feed for history and today, so the IEX feed is used live
 (real-time on the free plan); replay uses SIP history.
 """
@@ -31,6 +36,8 @@ from .data import resample_bars
 
 DATA = "https://data.alpaca.markets/v2/stocks/bars"
 TRADE = "https://paper-api.alpaca.markets/v2"
+PART = ("-h1", "-h2", "-h3", "-hm")      # suffixes of the half-at-+0.5R exit orders (hm = closed at market)
+OPEN = {"new", "accepted", "held", "pending_new", "partially_filled", "pending_replace", "accepted_for_bidding"}
 GAP_SESSIONS = {"1h": 5, "4h": 20, "D": 60}
 CLIMAX_TYPES = {"SELLING_CLIMAX", "BUYING_CLIMAX", "STOPPING_VOLUME", "TOPPING_OUT_VOLUME"}
 PREMIER_TYPES = {"SHOOTING_STAR", "SHOOTING_STAR_IN_DOWNTREND", "HAMMER", "HANGING_MAN", "HANGING_MAN_SHOOTING_STAR"}
@@ -125,6 +132,7 @@ class Config:
     long_min_rvol: float = 3.0      # bullish signals only on extremely high volume (time-of-day relative volume)
     max_adds: int = 1               # extra positions on a symbol that is already in a trade (same direction only)
     add_risk_usd: float = 0.0       # risk of an add in dollars; 0 = the same as risk_usd
+    half_at: float = 0.5            # take half off at this many R, then the rest goes to breakeven; 0 = all at the target
     short_trend_filter: bool = False   # off: it blocks pivot-high shorts at the top of up-moves (user's choice 2026-11-04)  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
@@ -157,6 +165,8 @@ class Plan:
 
 
 class Engine:
+    exits: dict = {}      # entry client id -> [(qty, px, why)] from the half-at-+0.5R exit orders (shared by both engines)
+
     def __init__(self, cfg: Config, history: dict[str, pd.DataFrame], daily: dict[str, pd.DataFrame]):
         self.cfg, self.history, self.daily = cfg, history, daily
         self.plans: list[Plan] = []
@@ -355,8 +365,14 @@ class Engine:
                         self._close(p, p.stop, t, "stop (same minute)")
                     continue
             if p.status == "filled" and t > p.fill_time:
+                h = self.cfg.half_at
+                if h > 0 and p.qty >= 2 and "half_px" not in p.extra:
+                    p.extra["half_px"] = round(p.fill + p.side * h * abs(p.fill - p.stop), 2)
+                if h > 0 and p.qty >= 2 and not p.extra.get("half_done") and \
+                        ((p.side > 0 and bar.high >= p.extra["half_px"]) or (p.side < 0 and bar.low <= p.extra["half_px"])):
+                    p.extra["half_done"], p.stop = True, round(p.fill, 2)
                 if (p.side < 0 and bar.high >= p.stop) or (p.side > 0 and bar.low <= p.stop):
-                    self._close(p, p.stop, t, "stop")
+                    self._close(p, p.stop, t, "breakeven stop" if p.extra.get("half_done") else "stop")
                 elif (p.side < 0 and bar.low <= p.target) or (p.side > 0 and bar.high >= p.target):
                     self._close(p, p.target, t, "target")
                 elif (t - t.normalize()) >= pd.Timedelta(hours=15, minutes=50):
@@ -364,6 +380,9 @@ class Engine:
 
     @staticmethod
     def _close(p: Plan, px: float, t: pd.Timestamp, why: str) -> None:
+        if p.extra.get("half_done") and why != "stop (same minute)":      # replay: half was taken at +0.5R
+            q1 = p.qty // 2
+            px, why = (q1 * p.extra["half_px"] + (p.qty - q1) * px) / p.qty, f"half at +0.5R, rest: {why}"
         p.status, p.exit, p.exit_time, p.exit_reason = "closed", float(px), t, why
 
     # ---------------------------------------------------------------- paper orders (live)
@@ -430,11 +449,20 @@ class Engine:
                     why = "target" if leg.get("type") == "limit" else "stop"
                     t = pd.Timestamp(leg["filled_at"]).tz_convert("America/New_York").tz_localize(None)
                     self._close(p, float(leg["filled_avg_price"]), t, why)
+                    return
+            ex = Engine.exits.get(o.get("client_order_id"), [])
+            done = sum(q for q, _, _ in ex)
+            if ex and done >= p.qty:
+                px = sum(q * x for q, x, _ in ex) / done
+                why = ", ".join(dict.fromkeys(w for _, _, w in ex))
+                self._close(p, px, now, why)
 
     @staticmethod
-    def _market_exit(sym: str, qty: int, side: int) -> float | None:
+    def _market_exit(sym: str, qty: int, side: int, cid: str | None = None) -> float | None:
         """Close `qty` shares of a position opened on `side` with a market order; returns the fill price if known."""
         body = {"symbol": sym, "qty": str(qty), "side": "sell" if side > 0 else "buy", "type": "market", "time_in_force": "day"}
+        if cid:
+            body["client_order_id"] = cid
         r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
         if not r.ok:
             print(f"!! could not close {qty} {sym}: {r.text[:200]}", flush=True)
@@ -472,10 +500,102 @@ class Engine:
         would never be cancelled when their window ends and could fill hours later). Filled positions keep their brackets."""
         n = 0
         for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json():
-            if o["client_order_id"].startswith(("vpa-", "alert-")) and o.get("filled_qty") in (None, "0"):
+            if o["client_order_id"].startswith(("vpa-", "alert-")) and not o["client_order_id"].endswith(PART) \
+                    and o.get("order_class") != "oco" and o.get("filled_qty") in (None, "0"):
                 requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
                 n += 1
         return n
+
+    # ---------------------------------------------------------------- half at +0.5R (live)
+    @staticmethod
+    def _oco(sym: str, side: int, qty: int, limit: float, stop: float, cid: str) -> bool:
+        body = {"symbol": sym, "qty": str(qty), "side": "sell" if side > 0 else "buy", "type": "limit", "time_in_force": "day",
+                "order_class": "oco", "take_profit": {"limit_price": f"{limit:.2f}"}, "stop_loss": {"stop_price": f"{stop:.2f}"},
+                "client_order_id": cid}
+        r = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
+        if not r.ok:
+            print(f"!! {cid}: exit order rejected ({r.text[:150]}), closing {qty} {sym} at market", flush=True)
+        return r.ok
+
+    @staticmethod
+    def _order(oid: str) -> dict:
+        return requests.get(TRADE + f"/orders/{oid}", headers=headers(), params={"nested": "true"}, timeout=30).json()
+
+    @classmethod
+    def manage_partials(cls, half_at: float) -> None:
+        """Call once a minute (paper). Splits filled candle / alert brackets into the two half exits, moves the second half
+        to breakeven once the first has taken its profit, and records the exit fills in Engine.exits for poll()."""
+        if half_at <= 0:
+            return
+        start = pd.Timestamp.now(tz="America/New_York").normalize()
+        r = requests.get(TRADE + "/orders", headers=headers(), timeout=30,
+                         params={"status": "all", "after": start.isoformat(), "limit": 500, "nested": "true", "direction": "asc"})
+        if not r.ok:
+            return
+        orders = r.json()
+        by = {o["client_order_id"]: o for o in orders}
+        for o in orders:
+            cid = o["client_order_id"]
+            if not cid.startswith(("vpa-", "alert-")) or cid.endswith(PART) or o.get("order_class") != "bracket" \
+                    or o.get("status") != "filled":
+                continue
+            try:
+                cls._manage_one(o, by, half_at)
+            except Exception as e:          # never let this stop the scanner
+                print(f"!! half exits {cid}: {e}", flush=True)
+
+    @classmethod
+    def _manage_one(cls, o: dict, by: dict, half_at: float) -> None:
+        cid, sym = o["client_order_id"], o["symbol"]
+        side = 1 if o["side"] == "buy" else -1
+        fill, qty = float(o["filled_avg_price"]), int(float(o["filled_qty"]))
+        legs = o.get("legs") or []
+        h1, h2, h3 = (by.get(cid + x) for x in PART[:3])
+        if h1 is None:
+            if qty < 2 or not legs or not all(lg["status"] in OPEN for lg in legs):
+                return                      # a leg already closed it (or one share: keep the plain bracket)
+            stop = float(next(lg for lg in legs if lg["type"] in ("stop", "stop_limit"))["stop_price"])
+            target = float(next(lg for lg in legs if lg["type"] == "limit")["limit_price"])
+            half_px = round(fill + side * half_at * abs(fill - stop), 2)
+            for lg in legs:
+                requests.delete(TRADE + f"/orders/{lg['id']}", headers=headers(), timeout=30)
+            time.sleep(1.5)
+            legs = cls._order(o["id"]).get("legs") or []
+            if any(lg["status"] == "filled" for lg in legs) or any(lg["status"] in OPEN for lg in legs):
+                return                      # closed by the bracket in the meantime, or the cancel has not landed yet
+            q1 = qty // 2
+            for x, q, lim in (("-h1", q1, half_px), ("-h2", qty - q1, target)):
+                if not cls._oco(sym, side, q, lim, stop, cid + x):
+                    cls._market_exit(sym, q, side, cid + "-hm" + x[-1])
+            print(f"[half exits] {sym} {cid}: {q1} at {half_px:.2f} (+{half_at:g}R), {qty - q1} at {target:.2f}, stop {stop:.2f}", flush=True)
+            return
+        # record exit fills so poll() can close the plan
+        ex = []
+        for k, h in ((x, by.get(cid + x)) for x in PART[:3]):
+            for y in [h] + ((h or {}).get("legs") or []) if h else []:
+                q = int(float(y.get("filled_qty") or 0))
+                if q:
+                    why = ("half at +%gR" % half_at if k == "-h1" else "target") if y["type"] == "limit" else \
+                          ("breakeven stop" if k == "-h3" else "stop")
+                    ex.append((q, float(y["filled_avg_price"]), why))
+        for x in ("-hm1", "-hm2", "-hm3"):
+            y = by.get(cid + x)
+            if y and float(y.get("filled_qty") or 0):
+                ex.append((int(float(y["filled_qty"])), float(y["filled_avg_price"]), "closed at market"))
+        cls.exits[cid] = ex
+        # first half took its profit and the second half still has its original stop: move it to breakeven
+        if h1.get("status") == "filled" and h2 is not None and h2.get("status") in OPEN and h3 is None:
+            be = round(fill, 2)
+            requests.delete(TRADE + f"/orders/{h2['id']}", headers=headers(), timeout=30)
+            time.sleep(1.5)
+            h2 = cls._order(h2["id"])
+            if h2.get("status") in OPEN or h2.get("status") == "filled" or \
+                    any(lg.get("status") == "filled" for lg in h2.get("legs") or []):
+                return
+            q2 = int(float(h2["qty"])) - int(float(h2.get("filled_qty") or 0))
+            if q2 > 0 and not cls._oco(sym, side, q2, float(h2["limit_price"]), be, cid + "-h3"):
+                cls._market_exit(sym, q2, side, cid + "-hm3")
+            print(f"[half exits] {sym} {cid}: first half filled, stop on the other {q2} moved to breakeven {be:.2f}", flush=True)
 
     # ---------------------------------------------------------------- logging
     def log(self, kind: str, p: Plan) -> None:
