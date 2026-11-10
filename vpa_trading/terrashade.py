@@ -4,7 +4,7 @@ TerraShade's terms ban scraping the site and its API, but they offer a Discord b
 and after the close (`/autopost`). The TerraShade bot posts into two channels in the user's server; our own read-only bot
 (token stored as a network secret for discord.com, injected by the proxy) reads those channels:
   #terrashade-heatmap   the levels cards (TSLA, AAPL, QQQ at 9:45 ET and after the close; first seen Nov 10)
-  #terrashade-alerts    only the welcome message so far
+  #terrashade-alerts    price events ("TSLA moved below put wall 375.00. Spot 374.97.")
 The scanner reads both channels every 10 minutes (two small requests), keeps every new post raw in logs/terrashade/<date>.jsonl
 and tags each signal with the latest levels for its ticker. Logged only, never a filter.
 """
@@ -24,6 +24,9 @@ NUM = r"\$?(-?\d[\d,]*\.?\d*)"
 # "Call wall: 400", "Put Wall 380", "Gamma flip — 383.0", "Zero gamma: 381", "Max pain: 390", "Vanna wall ..." etc.
 LEVEL = re.compile(r"([A-Za-z][A-Za-z +/\-]{1,30}?)\s*[:=—–\-|]\s*" + NUM)
 # the real autopost card (Nov 10): "Call wall **400.00** (+6.69% from spot)", "Zero gamma **358.31** ...", "Spot **374.92**"
+# the alerts channel: "**TSLA** moved below put wall **375.00**. Spot **374.97**."
+EVENT = re.compile(r"moved (above|below) ([A-Za-z ]+?)\s+\$?(-?\d[\d,]*\.?\d*)", re.I)
+SPOT = re.compile(r"\bspot\s+\$?(-?\d[\d,]*\.?\d*)", re.I)
 LINE = re.compile(r"^\s*([A-Za-z][A-Za-z ]{1,30}?)\s*[:=—–|]?\s*" + NUM + r"(?!\s*%)")
 
 
@@ -45,6 +48,15 @@ def parse(m: dict, known: set[str]) -> dict[str, dict]:
             if hits:
                 cur = hits[0]
             if cur is None:
+                continue
+            ev = EVENT.search(line)
+            if ev:                       # a price event: keep the level it crossed, the spot, and the event itself
+                lab, val = ev.group(2).strip().lower(), float(ev.group(3).replace(",", ""))
+                d = out.setdefault(cur, {})
+                d[lab], d["alert"] = val, f"moved {ev.group(1).lower()} {lab} {val:g}"
+                sp = SPOT.search(line)
+                if sp:
+                    d["spot"] = float(sp.group(1).replace(",", ""))
                 continue
             m0 = LINE.match(line)
             for lab, val in ([m0.groups()] if m0 else LEVEL.findall(line)):
@@ -98,7 +110,7 @@ class TerraShadeFeed:
                 if t.normalize() != day and "after" in params:
                     continue
                 for sym, lv in parse(m, self.known).items():
-                    self.levels[sym] = {**lv, "asof": str(t), "channel": name}
+                    self.levels[sym] = {**self.levels.get(sym, {}), **lv, "asof": str(t), "channel": name}   # add, never replace
                     n += 1
         return n
 

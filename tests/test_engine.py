@@ -222,3 +222,8 @@ def test_gex_walls_sit_on_the_right_side_of_price(monkeypatch):
     monkeypatch.setattr(G, "chain", lambda sym, now, max_days=30: c)
     lv = G.levels("NVDA", now)
     assert lv["put_wall"] == 170.0 and lv["call_wall"] == 200.0
+
+
+def test_terrashade_parse_alert_post():
+    m = {"content": "", "embeds": [{"title": "TSLA · Alert", "description": "**TSLA** moved below put wall **375.00**. Spot **374.97**."}]}
+    assert parse(m, {"TSLA"}) == {"TSLA": {"put wall": 375.0, "alert": "moved below put wall 375", "spot": 374.97}}
