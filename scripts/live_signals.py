@@ -13,6 +13,8 @@ Options: --tfs 9m 15m (default)   --families premier climax   --target 0.3% | 1R
          --breakout TSLA (trend-day noise-band breakout, default TSLA; --breakout with nothing after it disables it)
          --breakout-notional 100000
          --trend-filter (skip shorts when price is above session VWAP or the 5m EMA9 is above EMA21; off by default)
+         --max-daily-loss 3000 (close everything and stop for the day once the account is down that much; off by default)
+A failed minute (network error, bad reply) is logged and the loop carries on. Tests: python -m pytest tests
 Every signal, order, fill and exit is appended to logs/live/<date>.jsonl; a summary prints at the end of the day.
 """
 from __future__ import annotations
@@ -20,6 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -113,13 +116,14 @@ def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
 
 def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True, osc_trim: tuple | None = (80.0, 0.5)) -> None:
     d = pd.Timestamp(day)
+    cfg.close_min = LV.close_minute(d)
     syms = sorted(set(cfg.symbols) | set(breakout))
     end = min(d + pd.Timedelta(days=1), pd.Timestamp.now(tz="America/New_York").tz_localize(None) - pd.Timedelta(minutes=20))
     hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), end, feed="sip")   # free plan: no SIP from the last 15 min
     daily = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=500), d, tf="1Day", feed="sip")
     for sym in breakout:
-        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit, osc_trim=osc_trim)
-        nb.start_day(hist[sym], None, d)
+        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit, osc_trim=osc_trim, close_min=cfg.close_min)
+        nb.start_day(hist[sym], None, d, resume=False)
         today = hist[sym][(hist[sym].index.normalize() == d) & (hist[sym].index.time < pd.Timestamp("16:00").time())]
         for t in today.index:
             nb.on_minute(today[today.index <= t], t + pd.Timedelta(minutes=1), blocked=False, full=hist[sym][hist[sym].index <= t])
@@ -156,13 +160,42 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
         print(sa.to_string(index=False) if len(sa) else "no alerts")
 
 
-def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True, osc_trim: tuple | None = (80.0, 0.5)) -> None:
+def day_pnl() -> float | None:
+    """Today's change in account equity (open + closed trades), straight from Alpaca. None if it cannot be read."""
+    try:
+        a = requests.get(LV.TRADE + "/account", headers=LV.headers(), timeout=30).json()
+        return float(a["equity"]) - float(a["last_equity"])
+    except Exception:
+        return None
+
+
+def fetch_today(syms: list[str], boundary: pd.Timestamp) -> dict:
+    """Today's 1m bars up to `boundary`. If the minute that just closed is not published yet for some symbol, wait a
+    few seconds and read once more, so a signal candle is never judged without its last minute."""
+    start = boundary.normalize() + pd.Timedelta(hours=9, minutes=30)
+    today = LV.fetch_bars(syms, start, boundary, feed="iex")
+    want = boundary - pd.Timedelta(minutes=1)
+    if boundary > start and any(not len(today.get(s, [])) or today[s].index[-1] < want for s in syms):
+        time.sleep(4)
+        today = LV.fetch_bars(syms, start, boundary, feed="iex")
+    return today
+
+
+def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True,
+         osc_trim: tuple | None = (80.0, 0.5), max_daily_loss: float = 0.0) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
         return
     now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
-    hist = LV.fetch_bars(sorted(set(cfg.symbols) | set(breakout)), now - pd.Timedelta(days=45), now, feed="iex")
+    cfg.close_min = LV.close_minute(now)
+    flat_at = pd.Timedelta(hours=9, minutes=30 + cfg.close_min - 10)
+    if cfg.close_min != 390:
+        print(f"Short session: the market closes {cfg.close_min} minutes after the open. Last entries 30 minutes before, "
+              f"everything flat 10 minutes before.", flush=True)
+    halt = cfg.log_dir / f"halt_{now:%Y-%m-%d}.flag"
+    syms = sorted(set(cfg.symbols) | set(breakout))
+    hist = LV.fetch_bars(syms, now - pd.Timedelta(days=45), now, feed="iex")
     daily = LV.fetch_bars(cfg.symbols, now - pd.Timedelta(days=500), now - pd.Timedelta(minutes=20), tf="1Day", feed="sip")
     eng = LV.Engine(cfg, hist, daily)
     aeng = LV.Engine(replace(cfg, risk_usd=alert_risk, families=("premier",), require_gap=False), hist, daily)
@@ -176,93 +209,49 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
               f"${alert_risk:,.0f} risk per trade", flush=True)
     nbs = []
     for sym in breakout:
-        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit, osc_trim=osc_trim)
+        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit, osc_trim=osc_trim, close_min=cfg.close_min)
         nb.start_day(hist[sym], None, now.normalize())
         nbs.append(nb)
         print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
-    gex_levels: dict = {}
-    gex_at = None
-    ts = TerraShadeFeed(sorted(set(cfg.symbols) | set(breakout)))
+    if max_daily_loss:
+        print(f"Daily loss stop: everything is closed and trading ends for the day at -${max_daily_loss:,.0f}", flush=True)
+    st = {"gex": {}, "gex_at": None, "boundary": now.floor("min")}
+    ts = TerraShadeFeed(syms)
     posted = LVL.load(now)
     if len(posted):
         print(f"Posted levels loaded: {len(posted)} from {', '.join(sorted(posted.source.unique()))} "
               f"({', '.join(sorted(posted.sym.unique()))})", flush=True)
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
+    fails = 0
     while True:
         now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
-        boundary = now.floor("min")
-        if boundary - boundary.normalize() >= pd.Timedelta(hours=15, minutes=50):
+        boundary = st["boundary"] = now.floor("min")
+        if boundary - boundary.normalize() >= flat_at:
             if paper:
                 LV.Engine.flatten()
             break
-        if gex_at is None or boundary - gex_at >= pd.Timedelta(minutes=30):
-            refresh_gex(cfg, gex_levels, boundary)
-            gex_at = boundary
+        if halt.exists():                        # the daily loss stop fired earlier today (also after a restart)
+            if paper and (boundary.minute % 5 == 0):
+                LV.Engine.flatten()              # keep it flat; nothing new is opened
+            time.sleep(60)
+            continue
         try:
-            n_ts = ts.refresh(boundary)
-            if n_ts:
-                print(f"[{mst(boundary)} MST] TerraShade (Discord): new levels for " + ", ".join(
-                    f"{k} {', '.join(f'{a} {b}' for a, b in v.items() if a not in ('asof', 'channel'))}" for k, v in ts.levels.items()), flush=True)
-        except Exception as e:      # optional data: never stop the scanner
-            print(f"TerraShade feed error: {e}", flush=True)
-        today = LV.fetch_bars(sorted(set(cfg.symbols) | set(breakout)), boundary.normalize() + pd.Timedelta(hours=9, minutes=30), boundary, feed="iex")
-        eng.external = {nb.sym: nb.pos for nb in nbs}   # the candle scanner may add to the breakout's direction, never oppose it
-        for q in aeng.plans:
-            if q.status == "filled":
-                eng.external[q.sym] = q.side
-        for nb in nbs:                        # before refresh_busy, so the candle scanner sees a new breakout position
-            try:
-                t = today.get(nb.sym, pd.DataFrame())
-                t = t[t.index < boundary] if len(t) else t
-                held = any(p.sym == nb.sym and p.status in ("submitted", "filled") for p in eng.plans)
-                full = pd.concat([hist[nb.sym][hist[nb.sym].index.normalize() < boundary.normalize()], t]) if len(t) else None
-                nb.on_minute(t, boundary, blocked=held, full=full)
-            except Exception as e:      # never let the breakout stop the scanner
-                print(f"NB {nb.sym} error: {e}", flush=True)
-        if paper:
-            eng.refresh_busy()               # never double up after a restart
-            try:
-                LV.Engine.manage_partials(cfg.half_at)     # half at +0.5R, then breakeven (candle and alert trades)
-            except Exception as e:
-                print(f"half exits error: {e}", flush=True)
-        for sym in cfg.symbols:
-            m = pd.concat([hist[sym][hist[sym].index.normalize() < boundary.normalize()], today.get(sym, pd.DataFrame())])
-            m = m[m.index < boundary]
-            last_bar = m.iloc[-1] if len(m) else None
-            for e_ in (eng, aeng):
-                for p in e_.plans:
-                    if paper and p.sym == sym and p.status in ("submitted", "filled"):
-                        before = p.status
-                        e_.poll(p, last_bar, boundary)
-                        if p.status != before:
-                            e_.log(p.status, p)
-                            px = p.exit if p.status == "closed" else p.fill
-                            print(f"[{mst(boundary)} MST] {p.sym} {'(alert mode) ' if e_ is aeng else ''}{p.status} "
-                                  f"{f'{px:.2f}' if px else ''} {p.exit_reason}", flush=True)
-            for p in eng.signals(sym, m, boundary):
-                eng.plans.append(p)
-                tag_gex(p, gex_levels, m)
-                if ts.tag(p.sym):
-                    p.gex["terrashade"] = ts.tag(p.sym)
-                announce(p)
-                tag_levels(p, posted, m)
-                if paper:
-                    eng.submit(p)
-                eng.log("signal", p)
-            for p in (alert.signals(sym, m, boundary) if alert else []):
-                ok, why = alert_order_ok(p, eng, aeng)
-                if ok and paper:
-                    aeng.plans.append(p)
-                    aeng.submit(p)
-                    why = "placed" if p.status == "submitted" else f"not placed: {p.exit_reason}"
-                elif ok:
-                    why = "alert only"
-                tag_gex(p, gex_levels, m)
-                if ts.tag(p.sym):
-                    p.gex["terrashade"] = ts.tag(p.sym)
-                announce_alert(p, why)
-                tag_levels(p, posted, m)
-                aeng.log("signal", p)
+            if paper and max_daily_loss:
+                pnl = day_pnl()
+                if pnl is not None and pnl <= -max_daily_loss:
+                    print(f"[{mst(boundary)} MST] DAILY LOSS STOP: the account is {pnl:+,.0f} today (limit -{max_daily_loss:,.0f}). "
+                          f"Closing everything; no more trades today.", flush=True)
+                    cfg.log_dir.mkdir(parents=True, exist_ok=True)
+                    halt.write_text(f"{boundary} day P&L {pnl:.2f}\n")
+                    LV.Engine.flatten()
+                    continue
+            minute_step(cfg, paper, boundary, syms, hist, eng, aeng, alert, nbs, ts, posted, st)
+            fails = 0
+        except Exception as e:      # one bad minute (network, a malformed reply) must never stop the scanner mid-trade
+            fails += 1
+            print(f"[{mst(boundary)} MST] !! loop error ({fails} in a row): {type(e).__name__}: {str(e)[:200]}", flush=True)
+            if fails in (1, 5):
+                traceback.print_exc()
         time.sleep(max(1.0, 65 - (pd.Timestamp.now(tz="America/New_York").tz_localize(None) - boundary).total_seconds()))
     s = eng.summary()
     print("\nEnd of day summary:")
@@ -273,6 +262,88 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
         print(sa.to_string(index=False))
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
     s.to_csv(cfg.log_dir / f"{boundary:%Y-%m-%d}_summary.csv", index=False)
+
+
+def minute_step(cfg, paper, boundary, syms, hist, eng, aeng, alert, nbs, ts, posted, st) -> None:
+    """Everything the scanner does once a minute."""
+    gex_levels = st["gex"]
+    if st["gex_at"] is None or boundary - st["gex_at"] >= pd.Timedelta(minutes=30):
+        st["gex_at"] = boundary
+        refresh_gex(cfg, gex_levels, boundary)
+    try:
+        n_ts = ts.refresh(boundary)
+        if n_ts:
+            print(f"[{mst(boundary)} MST] TerraShade (Discord): new levels for " + ", ".join(
+                f"{k} {', '.join(f'{a} {b}' for a, b in v.items() if a not in ('asof', 'channel'))}" for k, v in ts.levels.items()), flush=True)
+    except Exception as e:      # optional data: never stop the scanner
+        print(f"TerraShade feed error: {e}", flush=True)
+    today = fetch_today(syms, boundary)
+    eng.external = {nb.sym: nb.pos for nb in nbs}   # the candle scanner may add to the breakout's direction, never oppose it
+    for q in aeng.plans:
+        if q.status == "filled":
+            eng.external[q.sym] = q.side
+    for nb in nbs:                        # before refresh_busy, so the candle scanner sees a new breakout position
+        try:
+            t = today.get(nb.sym, pd.DataFrame())
+            t = t[t.index < boundary] if len(t) else t
+            held = any(p.sym == nb.sym and p.status in ("submitted", "filled") for e_ in (eng, aeng) for p in e_.plans)
+            full = pd.concat([hist[nb.sym][hist[nb.sym].index.normalize() < boundary.normalize()], t]) if len(t) else None
+            nb.on_minute(t, boundary, blocked=held, full=full)
+        except Exception as e:      # never let the breakout stop the scanner
+            print(f"NB {nb.sym} error: {e}", flush=True)
+    if paper:
+        eng.refresh_busy()               # never double up after a restart
+        try:
+            LV.Engine.manage_partials(cfg.half_at)     # half at +0.5R, then breakeven (candle and alert trades)
+        except Exception as e:
+            print(f"half exits error: {e}", flush=True)
+    for sym in cfg.symbols:
+        try:
+            symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, posted, gex_levels)
+        except Exception as e:      # one symbol's problem must not skip the others
+            print(f"[{mst(boundary)} MST] !! {sym}: {type(e).__name__}: {str(e)[:200]}", flush=True)
+
+
+def symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, posted, gex_levels) -> None:
+    m = pd.concat([hist[sym][hist[sym].index.normalize() < boundary.normalize()], today.get(sym, pd.DataFrame())])
+    m = m[m.index < boundary]
+    last_bar = m.iloc[-1] if len(m) else None
+    for e_ in (eng, aeng):
+        for p in e_.plans:
+            if paper and p.sym == sym and p.status in ("submitted", "filled"):
+                before = p.status
+                e_.poll(p, last_bar, boundary)
+                if p.status != before:
+                    e_.log(p.status, p)
+                    px = p.exit if p.status == "closed" else p.fill
+                    print(f"[{mst(boundary)} MST] {p.sym} {'(alert mode) ' if e_ is aeng else ''}{p.status} "
+                          f"{f'{px:.2f}' if px else ''} {p.exit_reason}", flush=True)
+    if not len(m) or (boundary - m.index[-1]) > pd.Timedelta(minutes=3):
+        return                               # no fresh bars for this symbol (feed stalled): no new signals on old data
+    for p in eng.signals(sym, m, boundary):
+        eng.plans.append(p)
+        tag_gex(p, gex_levels, m)
+        if ts.tag(p.sym):
+            p.gex["terrashade"] = ts.tag(p.sym)
+        announce(p)
+        tag_levels(p, posted, m)
+        if paper:
+            eng.submit(p)
+        eng.log("signal", p)
+    for p in (alert.signals(sym, m, boundary) if alert else []):
+        ok, why = alert_order_ok(p, eng, aeng)
+        if ok and paper:
+            aeng.plans.append(p)
+            aeng.submit(p)
+            why = "placed" if p.status == "submitted" else f"not placed: {p.exit_reason}"
+        elif ok:
+            why = "alert only"
+        tag_gex(p, gex_levels, m)
+        if ts.tag(p.sym):
+            p.gex["terrashade"] = ts.tag(p.sym)
+        announce_alert(p, why)
+        tag_levels(p, posted, m)
+        aeng.log("signal", p)
 
 
 def flatten_and_report(day: str | None) -> None:
@@ -302,6 +373,7 @@ def main() -> None:
     ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
     ap.add_argument("--half-at", type=float, default=0.5, help="candle and alert trades: take half off at this many R, then breakeven (0 = off)")
     ap.add_argument("--no-breakout-trim", action="store_true", help="breakout: no 15m oscillator trim (half when it crosses 80/20 against)")
+    ap.add_argument("--max-daily-loss", type=float, default=0.0, help="close everything and stop for the day once the account is down this many dollars (0 = off)")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
     ap.add_argument("--flatten", action="store_true", help="cancel all paper orders, close all positions, print today's log")
@@ -316,7 +388,7 @@ def main() -> None:
                None if a.no_breakout_trim else (80.0, 0.5))
     else:
         live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit,
-               None if a.no_breakout_trim else (80.0, 0.5))
+             None if a.no_breakout_trim else (80.0, 0.5), a.max_daily_loss)
 
 
 if __name__ == "__main__":

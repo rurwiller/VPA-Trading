@@ -11,8 +11,12 @@ Order: bracket, entry = stop order one cent beyond the signal candle's opposite 
 Half at +0.5R (Config.half_at, 0 = off): once the entry fills, the bracket's two legs are swapped for two OCO exit orders,
   half the shares with a limit at +0.5R, the rest with the original target, both with the original stop (client ids
   <entry id>-h1 / -h2). When -h1 takes its profit, -h2 is replaced by -h3 with its stop at the entry fill (breakeven).
-  Stateless (read back from Alpaca every minute), so it keeps working across restarts. 5-year test (reports/trim_test.md):
-  same expectancy as all-at-1R, profitable trades 49% -> 65%.
+  Stateless (read back from Alpaca every minute), so it keeps working across restarts. If a step is interrupted (a slow
+  cancel, a restart between two orders) the next minute finishes it: shares are never left without a stop, and exit
+  orders are never placed for more shares than the scanner still holds. 5-year test (reports/trim_test.md): same
+  expectancy as all-at-1R, profitable trades 49% -> 65%.
+Session times come from Alpaca's calendar (close_minute): last entry 30 minutes before the close, flat 10 minutes before,
+  so a 13:00 half day is handled (12:30 / 12:50).
 Volume (relative volume, climaxes) uses the same feed for history and today, so the IEX feed is used live
 (real-time on the free plan); replay uses SIP history.
 """
@@ -48,14 +52,35 @@ def headers() -> dict:
 
 
 def _get(url: str, params: dict | None = None) -> dict:
+    r = None
     for k in range(6):
-        r = requests.get(url, headers=headers(), params=params, timeout=60)
+        try:
+            r = requests.get(url, headers=headers(), params=params, timeout=60)
+        except requests.RequestException:      # a dropped connection or timeout: retry like a server error
+            if k == 5:
+                raise
+            time.sleep(2 + 2 ** k)
+            continue
         if r.status_code == 429 or r.status_code >= 500:
             time.sleep(2 + 2 ** k)
             continue
         r.raise_for_status()
         return r.json()
     r.raise_for_status()
+
+
+def close_minute(day=None) -> int:
+    """Minutes from 9:30 ET to the session close on `day` (default today): 390 on a normal day, 210 on a 13:00 half day.
+    From Alpaca's calendar; 390 if it cannot be read. Entries stop 30 minutes before it, the flatten is 10 minutes before."""
+    try:
+        d = pd.Timestamp(day if day is not None else pd.Timestamp.now(tz="America/New_York")).strftime("%Y-%m-%d")
+        cal = _get(TRADE + "/calendar", {"start": d, "end": d})
+        if cal and cal[0]["date"] == d:
+            h, m = map(int, cal[0]["close"].split(":"))
+            return h * 60 + m - 570
+    except Exception as e:
+        print(f"!! could not read the market calendar ({e}); assuming a 16:00 close", flush=True)
+    return 390
 
 
 def fetch_bars(symbols: list[str], start, end, tf: str = "1Min", feed: str = "iex") -> dict[str, pd.DataFrame]:
@@ -133,6 +158,7 @@ class Config:
     max_adds: int = 1               # extra positions on a symbol that is already in a trade (same direction only)
     add_risk_usd: float = 0.0       # risk of an add in dollars; 0 = the same as risk_usd
     half_at: float = 0.5            # take half off at this many R, then the rest goes to breakeven; 0 = all at the target
+    close_min: int = 390            # minutes from 9:30 to today's close (210 on a half day); see close_minute()
     short_trend_filter: bool = False   # off: it blocks pivot-high shorts at the top of up-moves (user's choice 2026-11-04)  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
@@ -166,6 +192,7 @@ class Plan:
 
 class Engine:
     exits: dict = {}      # entry client id -> [(qty, px, why)] from the half-at-+0.5R exit orders (shared by both engines)
+    nb_net: dict = {}     # symbol -> signed shares the breakout holds (its own "nb-" orders today); never ours to protect
 
     def __init__(self, cfg: Config, history: dict[str, pd.DataFrame], daily: dict[str, pd.DataFrame]):
         self.cfg, self.history, self.daily = cfg, history, daily
@@ -179,7 +206,7 @@ class Engine:
         """Signals whose candle closed exactly at `now` (a 1m boundary)."""
         out = []
         minute = (now - now.normalize()) / pd.Timedelta(minutes=1) - 570
-        if not 30 <= minute <= 360:
+        if not 30 <= minute <= self.cfg.close_min - 30:
             return out
         active = [p for p in self.plans if p.sym == sym and p.status in ("planned", "submitted", "filled")]
         filled = [p for p in active if p.status == "filled"]
@@ -353,10 +380,14 @@ class Engine:
             if p.sym != sym or p.status not in ("planned", "filled"):
                 continue
             if p.status == "planned":
-                if (p.side < 0 and bar.high > p.wick) or (p.side > 0 and bar.low < p.wick) or t + pd.Timedelta(minutes=1) > p.valid_until:
-                    p.status, p.exit_reason = "cancelled", "wick taken first" if t + pd.Timedelta(minutes=1) <= p.valid_until else "not triggered in time"
-                    continue
                 hit = bar.low <= p.entry if p.side < 0 else bar.high >= p.entry
+                late = t + pd.Timedelta(minutes=1) > p.valid_until
+                took = (p.side < 0 and bar.high > p.wick) or (p.side > 0 and bar.low < p.wick)
+                # a minute that both triggers the entry and takes the wick: the order is unknown, so count the bad
+                # one (filled, then stopped if the stop was reached) instead of quietly cancelling the trade
+                if late or (took and not hit):
+                    p.status, p.exit_reason = "cancelled", "not triggered in time" if late else "wick taken first"
+                    continue
                 if hit:
                     p.status, p.fill_time = "filled", t
                     p.fill = min(bar.open, p.entry) if p.side < 0 else max(bar.open, p.entry)
@@ -375,8 +406,8 @@ class Engine:
                     self._close(p, p.stop, t, "breakeven stop" if p.extra.get("half_done") else "stop")
                 elif (p.side < 0 and bar.low <= p.target) or (p.side > 0 and bar.high >= p.target):
                     self._close(p, p.target, t, "target")
-                elif (t - t.normalize()) >= pd.Timedelta(hours=15, minutes=50):
-                    self._close(p, bar.close, t, "flat 15:50 ET")
+                elif (t - t.normalize()) >= pd.Timedelta(hours=9, minutes=30 + self.cfg.close_min - 10):
+                    self._close(p, bar.close, t, "flat 10 min before the close")
 
     @staticmethod
     def _close(p: Plan, px: float, t: pd.Timestamp, why: str) -> None:
@@ -485,14 +516,19 @@ class Engine:
     @staticmethod
     def flatten() -> None:
         """Cancel every order, then close every position, retrying until Alpaca shows none (closes finish a moment later)."""
-        import time
-        requests.delete(TRADE + "/orders", headers=headers(), timeout=30)
-        time.sleep(3)
-        for _ in range(6):
-            requests.delete(TRADE + "/positions", headers=headers(), params={"cancel_orders": "true"}, timeout=30)
-            time.sleep(4)
-            if not requests.get(TRADE + "/positions", headers=headers(), timeout=30).json():
-                break
+        for k in range(8):                    # a network error here must not leave positions open: keep trying
+            try:
+                if k == 0:
+                    requests.delete(TRADE + "/orders", headers=headers(), timeout=30)
+                    time.sleep(3)
+                requests.delete(TRADE + "/positions", headers=headers(), params={"cancel_orders": "true"}, timeout=30)
+                time.sleep(4)
+                if requests.get(TRADE + "/positions", headers=headers(), timeout=30).json() == []:
+                    return
+            except requests.RequestException as e:
+                print(f"!! flatten attempt {k + 1} failed: {e}", flush=True)
+                time.sleep(5)
+        print("!! FLATTEN DID NOT CONFIRM: positions may still be open at Alpaca", flush=True)
 
     @staticmethod
     def cancel_stale_entries() -> int:
@@ -534,6 +570,13 @@ class Engine:
             return
         orders = r.json()
         by = {o["client_order_id"]: o for o in orders}
+        net: dict = {}
+        for o in orders:
+            if o["client_order_id"].startswith("nb-"):
+                for y in [o] + (o.get("legs") or []):
+                    q = float(y.get("filled_qty") or 0)
+                    net[o["symbol"]] = net.get(o["symbol"], 0) + (q if y["side"] == "buy" else -q)
+        cls.nb_net = {k: int(round(v)) for k, v in net.items()}
         for o in orders:
             cid = o["client_order_id"]
             if not cid.startswith(("vpa-", "alert-")) or cid.endswith(PART) or o.get("order_class") != "bracket" \
@@ -544,6 +587,36 @@ class Engine:
             except Exception as e:          # never let this stop the scanner
                 print(f"!! half exits {cid}: {e}", flush=True)
 
+    @staticmethod
+    def _position(sym: str) -> int:
+        """Signed shares held in `sym` at Alpaca (0 if none)."""
+        r = requests.get(TRADE + f"/positions/{sym}", headers=headers(), timeout=30)
+        return int(float(r.json().get("qty") or 0)) if r.status_code == 200 else 0
+
+    @classmethod
+    def _cancel_wait(cls, ids: list[str], parent_id: str, tries: int = 10) -> dict:
+        """Cancel orders and wait until Alpaca shows none of them open (up to `tries` seconds). Returns the parent re-read."""
+        for i in ids:
+            requests.delete(TRADE + f"/orders/{i}", headers=headers(), timeout=30)
+        o = {}
+        for _ in range(tries):
+            time.sleep(1.0)
+            o = cls._order(parent_id)
+            if not any(y.get("status") in OPEN for y in [o] + (o.get("legs") or []) if y["id"] in ids):
+                break
+        return o
+
+    @classmethod
+    def _exit_pair(cls, sym: str, side: int, q: int, limit: float, stop: float, cid: str, fallback_cid: str) -> None:
+        """An OCO exit (limit + stop) for q shares. Never more than the account still holds on that side; if Alpaca
+        refuses the OCO, those shares are closed at market so they are never left without a stop."""
+        q = min(q, max((cls._position(sym) - cls.nb_net.get(sym, 0)) * side, 0))
+        if q <= 0:
+            print(f"!! {cid}: no shares left to protect in {sym} (already closed)", flush=True)
+            return
+        if not cls._oco(sym, side, q, limit, stop, cid):
+            cls._market_exit(sym, q, side, fallback_cid)
+
     @classmethod
     def _manage_one(cls, o: dict, by: dict, half_at: float) -> None:
         cid, sym = o["client_order_id"], o["symbol"]
@@ -551,23 +624,40 @@ class Engine:
         fill, qty = float(o["filled_avg_price"]), int(float(o["filled_qty"]))
         legs = o.get("legs") or []
         h1, h2, h3 = (by.get(cid + x) for x in PART[:3])
-        if h1 is None:
-            if qty < 2 or not legs or not all(lg["status"] in OPEN for lg in legs):
-                return                      # a leg already closed it (or one share: keep the plain bracket)
+        hm = {x: by.get(cid + "-hm" + x) for x in "123"}
+        if h1 is None and hm["1"] is None:
+            if qty < 2 or not legs or any(lg["status"] == "filled" for lg in legs):
+                return                      # the bracket closed it, or one share: keep the plain bracket
             stop = float(next(lg for lg in legs if lg["type"] in ("stop", "stop_limit"))["stop_price"])
             target = float(next(lg for lg in legs if lg["type"] == "limit")["limit_price"])
+            open_ids = [lg["id"] for lg in legs if lg["status"] in OPEN]
+            if open_ids:
+                legs = cls._cancel_wait(open_ids, o["id"]).get("legs") or []
+                if any(lg["status"] == "filled" for lg in legs) or any(lg["status"] in OPEN for lg in legs):
+                    return                  # closed by the bracket meanwhile, or the cancel has not landed: retried next minute
+            else:
+                print(f"!! {cid}: {sym} bracket legs are cancelled and no exit orders exist: re-placing them", flush=True)
+            # here the legs are cancelled and nothing protects the shares: place the two exits now
+            # (also reached on a later minute / after a restart if the first attempt was interrupted)
+            left = qty - sum(int(float(lg.get("filled_qty") or 0)) for lg in legs)
+            q1 = min(qty // 2, left)
             half_px = round(fill + side * half_at * abs(fill - stop), 2)
-            for lg in legs:
-                requests.delete(TRADE + f"/orders/{lg['id']}", headers=headers(), timeout=30)
-            time.sleep(1.5)
-            legs = cls._order(o["id"]).get("legs") or []
-            if any(lg["status"] == "filled" for lg in legs) or any(lg["status"] in OPEN for lg in legs):
-                return                      # closed by the bracket in the meantime, or the cancel has not landed yet
-            q1 = qty // 2
-            for x, q, lim in (("-h1", q1, half_px), ("-h2", qty - q1, target)):
-                if not cls._oco(sym, side, q, lim, stop, cid + x):
-                    cls._market_exit(sym, q, side, cid + "-hm" + x[-1])
-            print(f"[half exits] {sym} {cid}: {q1} at {half_px:.2f} (+{half_at:g}R), {qty - q1} at {target:.2f}, stop {stop:.2f}", flush=True)
+            cls._exit_pair(sym, side, q1, half_px, stop, cid + "-h1", cid + "-hm1")
+            if h2 is None and hm["2"] is None:
+                cls._exit_pair(sym, side, left - q1, target, stop, cid + "-h2", cid + "-hm2")
+            print(f"[half exits] {sym} {cid}: {q1} at {half_px:.2f} (+{half_at:g}R), {left - q1} at {target:.2f}, stop {stop:.2f}", flush=True)
+            return
+        if h2 is None and hm["2"] is None and h3 is None and hm["3"] is None and h1 is not None:
+            # interrupted between the two exit orders: the second half has no protection yet
+            lg = (h1.get("legs") or [{}])[0]
+            stop, target = float(lg.get("stop_price") or 0), None
+            for y in o.get("legs") or []:
+                if y["type"] == "limit":
+                    target = float(y["limit_price"])
+            q2 = qty - int(float(h1["qty"]))
+            if stop and target and q2 > 0:
+                print(f"!! {cid}: second exit order missing for {q2} {sym}: placing it", flush=True)
+                cls._exit_pair(sym, side, q2, target, stop, cid + "-h2", cid + "-hm2")
             return
         # record exit fills so poll() can close the plan
         ex = []
@@ -578,23 +668,27 @@ class Engine:
                     why = ("half at +%gR" % half_at if k == "-h1" else "target") if y["type"] == "limit" else \
                           ("breakeven stop" if k == "-h3" else "stop")
                     ex.append((q, float(y["filled_avg_price"]), why))
-        for x in ("-hm1", "-hm2", "-hm3"):
-            y = by.get(cid + x)
+        for y in hm.values():
             if y and float(y.get("filled_qty") or 0):
                 ex.append((int(float(y["filled_qty"])), float(y["filled_avg_price"]), "closed at market"))
         cls.exits[cid] = ex
-        # first half took its profit and the second half still has its original stop: move it to breakeven
-        if h1.get("status") == "filled" and h2 is not None and h2.get("status") in OPEN and h3 is None:
+        # first half took its profit: the second half's stop moves to breakeven (h2 -> h3)
+        if h1 is not None and h1.get("status") == "filled" and h2 is not None and h3 is None and hm["3"] is None:
+            h2_legs = h2.get("legs") or []
+            if h2.get("status") == "filled" or any(lg.get("status") == "filled" for lg in h2_legs):
+                return                      # the second half already ended at its target or stop
+            open_ids = [y["id"] for y in [h2] + h2_legs if y.get("status") in OPEN]
+            if open_ids:
+                h2 = cls._cancel_wait(open_ids, h2["id"])
+                h2_legs = h2.get("legs") or []
+                if h2.get("status") in OPEN or h2.get("status") == "filled" or \
+                        any(lg.get("status") in OPEN or lg.get("status") == "filled" for lg in h2_legs):
+                    return                  # retried next minute
             be = round(fill, 2)
-            requests.delete(TRADE + f"/orders/{h2['id']}", headers=headers(), timeout=30)
-            time.sleep(1.5)
-            h2 = cls._order(h2["id"])
-            if h2.get("status") in OPEN or h2.get("status") == "filled" or \
-                    any(lg.get("status") == "filled" for lg in h2.get("legs") or []):
-                return
-            q2 = int(float(h2["qty"])) - int(float(h2.get("filled_qty") or 0))
-            if q2 > 0 and not cls._oco(sym, side, q2, float(h2["limit_price"]), be, cid + "-h3"):
-                cls._market_exit(sym, q2, side, cid + "-hm3")
+            q2 = int(float(h2["qty"])) - int(float(h2.get("filled_qty") or 0)) - \
+                sum(int(float(lg.get("filled_qty") or 0)) for lg in h2_legs)
+            if q2 > 0:
+                cls._exit_pair(sym, side, q2, float(h2["limit_price"]), be, cid + "-h3", cid + "-hm3")
             print(f"[half exits] {sym} {cid}: first half filled, stop on the other {q2} moved to breakeven {be:.2f}", flush=True)
 
     # ---------------------------------------------------------------- logging

@@ -14,6 +14,7 @@ B. Candle trades (pivot-wick candles on 9m / 15m, scanner entry: stop-entry thro
 from __future__ import annotations
 
 import math
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -40,10 +41,12 @@ def matrices(s):
     mi = ((m.index - day) / pd.Timedelta(minutes=1)).astype(int) - 570
     m = m.assign(day=day, mi=mi, osc=s.osc_clock["15m"])
     m = m[(m.mi >= 0) & (m.mi < 390)]
+    last_close = m.groupby("day").close.last()          # every session, half days included
     full = m.groupby("day").mi.max() >= 389
     m = m[m.day.isin(full.index[full])]
     piv = lambda col: m.pivot(index="day", columns="mi", values=col).reindex(columns=range(390)).ffill(axis=1)  # noqa: E731
     C = piv("close")
+    C.attrs["prev_close"] = last_close.shift(1).reindex(C.index).to_numpy()   # the real prior session's close
     O = m[m.mi == m.groupby("day").mi.transform("min")].set_index("day").open.reindex(C.index)
     pv = (m.vwap.fillna(m.close) * m.volume) if "vwap" in m else m.close * m.volume
     m = m.assign(pv=pv)
@@ -57,7 +60,7 @@ def breakout(sym, mats, osc_trim=None, fixed=(0.01, 0.02)) -> pd.Series:
     """osc_trim = (level, fraction) or None. fixed = profit levels for the thirds (empty = none)."""
     C, O, VW, Hh, Ll, OS = mats
     c, o, vw = C.to_numpy(), O.to_numpy(), VW.to_numpy()
-    prev = np.r_[np.nan, c[:-1, 389]]
+    prev = C.attrs["prev_close"]
     sigma = pd.DataFrame(np.abs(c / o[:, None] - 1)).rolling(14).mean().shift(1).to_numpy()
     cost = cost_bps(sym) / 1e4
     ub0, lb0 = np.fmax(o, prev), np.fmin(o, prev)
@@ -135,9 +138,10 @@ def candle_sim(O, H, L, C, OS, minute, last, i, d, hi, lo, step, mode):
     end = min(i + 2 * step, last[i])
     fill, j = None, None
     for jj in range(i + 1, end + 1):
-        if (d < 0 and H[jj] > wick) or (d > 0 and L[jj] < wick):
-            return None
-        if (d < 0 and L[jj] <= entry) or (d > 0 and H[jj] >= entry):
+        hit = (d < 0 and L[jj] <= entry) or (d > 0 and H[jj] >= entry)
+        if ((d < 0 and H[jj] > wick) or (d > 0 and L[jj] < wick)) and not (hit and STRICT):
+            return None         # wick taken before the entry (STRICT: a bar doing both counts as filled, then stopped)
+        if hit:
             fill, j = (min(O[jj], entry) if d < 0 else max(O[jj], entry)), jj
             break
     if fill is None:
@@ -177,6 +181,7 @@ def candle_sim(O, H, L, C, OS, minute, last, i, d, hi, lo, step, mode):
     return pnl / risk
 
 
+STRICT = os.environ.get("STRICT_SAME_BAR") == "1"    # the pessimistic reading of a 1m bar that triggers and takes the wick
 MODES = ["full_1R", "half05_BE_1R", "half05_BE_2R", "osc80_BE_1R", "osc80_BE_2R"]
 
 
@@ -250,7 +255,7 @@ def main() -> None:
         d = cd.time < SPLIT
         L.append(f"| {nm} | {cd.loc[d, m].mean():+.3f} | {cd.loc[~d, m].mean():+.3f} | {(cd.loc[~d, m] > 0).mean():.0%} |")
     L.append(f"\n{len(cd):,} trades that filled.")
-    Path("reports/trim_test.md").write_text("\n".join(L) + "\n")
+    Path(os.environ.get("TRIM_OUT", "reports/trim_test.md")).write_text("\n".join(L) + "\n")
     print("\n".join(L))
 
 

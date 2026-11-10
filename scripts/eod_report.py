@@ -106,7 +106,8 @@ def main() -> None:
             print(f"| {s} | {int(x.trades)} | {int(x.wins)} | {x.wins / x.trades:.0%} | {'+' if x.pnl >= 0 else '-'}${abs(x.pnl):,.0f} | {x.pnl / last:+.2%} |")
         tot, nw = tr.pnl.sum(), int((tr.pnl > 0).sum())
         print(f"| **All trades** | {len(tr)} | {nw} | {nw / len(tr):.0%} | **{'+' if tot >= 0 else '-'}${abs(tot):,.0f}** | **{tot / last:+.2%}** |")
-    print(f"\nAccount equity: ${last:,.2f} -> ${eq:,.2f} (**{'+' if eq >= last else '-'}${abs(eq - last):,.2f}**)")
+    if day.strftime("%Y-%m-%d") == pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d"):   # only today's is known
+        print(f"\nAccount equity: ${last:,.2f} -> ${eq:,.2f} (**{'+' if eq >= last else '-'}${abs(eq - last):,.2f}**)")
     p = Path("logs/live") / f"{day:%Y-%m-%d}.jsonl"
     if p.exists():
         latest = {}

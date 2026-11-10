@@ -39,6 +39,7 @@ def matrices(sym: str):
     mi = ((m.index - day) / pd.Timedelta(minutes=1)).astype(int) - 570
     m = m.assign(day=day, mi=mi)
     m = m[(m.mi >= 0) & (m.mi < 390)]
+    last_close = m.groupby("day").close.last()          # every session, half days included
     full = m.groupby("day").mi.max() >= 389
     m = m[m.day.isin(full.index[full])]
     C = m.pivot(index="day", columns="mi", values="close").reindex(columns=range(390)).ffill(axis=1)
@@ -48,6 +49,7 @@ def matrices(sym: str):
     PV = m.pivot(index="day", columns="mi", values="pv").reindex(columns=range(390)).fillna(0).cumsum(axis=1)
     V = m.pivot(index="day", columns="mi", values="volume").reindex(columns=range(390)).fillna(0).cumsum(axis=1)
     VW = (PV / V.replace(0, np.nan)).ffill(axis=1)
+    C.attrs["prev_close"] = last_close.shift(1).reindex(C.index).to_numpy()   # the real prior session's close
     return C, O.reindex(C.index), VW
 
 
@@ -56,7 +58,7 @@ def run_symbol(sym: str) -> str:
     c = C.to_numpy()
     o = O.to_numpy()
     days = C.index
-    prev = np.r_[np.nan, c[:-1, 389]]
+    prev = C.attrs["prev_close"]    # was the last FULL session's close, which is wrong on the day after a half day
     cost = cost_bps(sym) / 1e4
     rows = []
     # ---- 1. market intraday momentum

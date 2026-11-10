@@ -14,16 +14,22 @@ import pandas as pd
 DIR = Path("data/levels")
 
 
-def load(day: pd.Timestamp, folder: Path = DIR) -> pd.DataFrame:
+MAX_AGE_DAYS = 7      # a post older than this is not used: week-old levels on a moved stock are noise
+
+
+def load(day: pd.Timestamp, folder: Path = DIR, max_age_days: int = MAX_AGE_DAYS) -> pd.DataFrame:
     files = sorted(folder.glob("*.csv")) if folder.exists() else []
     latest: dict[str, Path] = {}
     for f in files:
         try:
             d, src = f.stem.split("_", 1)
-            if pd.Timestamp(d) <= day.normalize():
+            age = (day.normalize() - pd.Timestamp(d)).days
+            if 0 <= age:
                 latest[src] = f                 # sorted by name = by date, so the last one wins
         except ValueError:
             continue
+    latest = {s: f for s, f in latest.items()
+              if (day.normalize() - pd.Timestamp(f.stem.split("_", 1)[0])).days <= max_age_days}
     if not latest:
         return pd.DataFrame(columns=["date", "source", "sym", "lo", "hi", "role", "note"])
     return pd.concat([pd.read_csv(f) for f in latest.values()], ignore_index=True)

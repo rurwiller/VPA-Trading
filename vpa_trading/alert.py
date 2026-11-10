@@ -43,7 +43,7 @@ class AlertMode:
 
     def signals(self, sym: str, m1: pd.DataFrame, now: pd.Timestamp) -> list[Plan]:
         minute = (now - now.normalize()) / pd.Timedelta(minutes=1) - 570
-        if not 30 <= minute <= 360:
+        if not 30 <= minute <= self.eng.cfg.close_min - 30:
             return []
         b5 = frame(m1, "5m")
         a5 = float(b5[b5.closes_at <= now].atr.iloc[-1])

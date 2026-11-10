@@ -23,6 +23,11 @@
             long, <= 20 while short) AFTER the entry, while the trade is in profit, half of the original size is sold at
             market. That trim replaces the next profit level, and the stop on what is left moves to breakeven. 5-year TSLA
             test (reports/trim_test.md): about the same profit, smoother days (Sharpe since Nov 2024 0.56 -> 0.67).
+  conflicts one net position per symbol at Alpaca, so the breakout never opens against shares another strategy holds
+            (candle scanner, alert mode, a position from before a restart). If it is in a trade and the rule says
+            reverse while the scanner holds an add in the old direction, it only exits.
+  data      a check is skipped if the newest price bar is more than 3 minutes old; half days are left out of sigma and
+            there is no check in the last 30 minutes of a short session.
 State (position, remaining qty, tranches) is kept in logs/live/nb_<SYM>_<date>.json so a restart picks it up.
 """
 from __future__ import annotations
@@ -51,9 +56,10 @@ def sigma_curve(hist: pd.DataFrame, day: pd.Timestamp, lookback: int = 14) -> pd
     rows = []
     for d, g in h.groupby(h.index.normalize()):
         mi = ((g.index - d) / pd.Timedelta(minutes=1)).astype(int) - 570 + 1   # minutes after open at the bar close
-        c = pd.Series(g.close.to_numpy(), index=mi).reindex(range(1, 391)).ffill()
-        if c.notna().sum() < 380:
+        c = pd.Series(g.close.to_numpy(), index=mi).reindex(range(1, 391))
+        if c.notna().sum() < 380 or mi.max() < 385:   # a half day or a day with missing data (counted BEFORE filling gaps)
             continue
+        c = c.ffill()
         rows.append((c / float(g.open.iat[0]) - 1).abs())
     rows = rows[-lookback:]
     return pd.concat(rows, axis=1).mean(axis=1) if len(rows) == lookback else pd.Series(dtype=float)
@@ -61,8 +67,9 @@ def sigma_curve(hist: pd.DataFrame, day: pd.Timestamp, lookback: int = 14) -> pd
 
 class NoiseBand:
     def __init__(self, sym: str, notional: float, log_dir: Path, paper: bool, exit_opposite: bool = True, exit_rvol: float = 3.0,
-                 osc_trim: tuple | None = (80.0, 0.5)):
+                 osc_trim: tuple | None = (80.0, 0.5), close_min: int = 390):
         self.sym, self.notional, self.log_dir, self.paper = sym, notional, log_dir, paper
+        self.close_min = close_min                # minutes from 9:30 to the close (210 on a half day): no checks in the last 30
         self.exit_opposite, self.exit_rvol = exit_opposite, exit_rvol
         self.osc_trim = osc_trim                  # (level, fraction of the original size) or None
         self.osc_armed, self.osc_trimmed = False, False
@@ -100,14 +107,15 @@ class NoiseBand:
         print(f"[{(pd.Timestamp(kw.get('time', pd.Timestamp.now())) - pd.Timedelta(hours=2)):%H:%M} MST] NB {self.sym} {kind} "
               + " ".join(f"{k}={v}" for k, v in kw.items() if k != "time"), flush=True)
 
-    def start_day(self, hist: pd.DataFrame, today: pd.DataFrame, day: pd.Timestamp) -> None:
+    def start_day(self, hist: pd.DataFrame, today: pd.DataFrame, day: pd.Timestamp, resume: bool = True) -> None:
+        """resume=False (replays): start clean instead of loading the state a previous run of the same day left behind."""
         self.day = day
         self.sigma = sigma_curve(hist, day)
         prev = hist[hist.index.normalize() < day]
         prev = prev[prev.index.time < pd.Timestamp("16:00").time()]
         self.prev_close = float(prev.close.iat[-1]) if len(prev) else np.nan
         p = self._state_path()
-        if p.exists():
+        if p.exists() and resume:
             s = json.loads(p.read_text())
             self.pos, self.qty, self.entry, self.guard_id, self.done = s["pos"], s["qty"], s["entry"], s["guard_id"], set(s["done"])
             self.tranches = s.get("tranches", [])
@@ -138,6 +146,13 @@ class NoiseBand:
                 q = float(y.get("filled_qty") or 0)
                 net += q if y["side"] == "buy" else -q
         return int(round(net))
+
+    def _others_net(self) -> int:
+        """Signed shares other strategies (candle scanner, alert mode, anything else) hold in this symbol at Alpaca."""
+        mine = self._net_mine()
+        r = requests.get(TRADE + f"/positions/{self.sym}", headers=headers(), timeout=30)
+        total = int(float(r.json().get("qty") or 0)) if r.status_code == 200 else 0
+        return total - (mine or 0)
 
     def _sync(self, now: pd.Timestamp | None = None) -> None:
         """Compare with Alpaca: shares closed there (profit-taking limits or protective stops) reduce the tracked qty."""
@@ -256,17 +271,29 @@ class NoiseBand:
         if self.pos and self.osc_trim and not self.osc_trimmed and full is not None:
             self._osc_check(full, float(today.close.iat[-1]), now)
         minute = int((now - now.normalize()) / pd.Timedelta(minutes=1)) - 570
-        if minute not in CHECK_MINUTES or minute in self.done:
+        if minute not in CHECK_MINUTES or minute > self.close_min - 30 or minute in self.done:
             return
         self.done.add(minute)
+        stale = (now - today.index[-1]) / pd.Timedelta(minutes=1) - 1
+        if stale > 3:                    # the data feed has stalled: do not decide on an old price
+            self._log("check skipped: last price bar is stale", time=now, minutes_old=int(stale))
+            self._save()
+            return
         px = float(today.close.iat[-1])
         pv = (today.vwap.fillna(today.close) if "vwap" in today else today.close) * today.volume
         vwap = float(pv.sum() / today.volume.sum()) if today.volume.sum() > 0 else px
         want = self.decide(px, vwap, minute)
-        if want != self.pos and want != 0 and self.pos == 0 and blocked:
-            self._log("entry skipped: candle scanner holds the symbol", time=now, px=px, want=want, bands=self.last_bands)
-            self._save()
-            return
+        if want != self.pos and want != 0:
+            # never open against (or on top of) shares another strategy holds: one net position per symbol at Alpaca.
+            # A same-direction scanner add on top of OUR position is fine until we want to reverse.
+            others = self._others_net() if self.paper else 0
+            if (self.pos == 0 and (blocked or others)) or (others and np.sign(others) != want):
+                if self.pos != 0:
+                    self._trade(0, px, now)      # the rule says get out; just do not reverse into the other trade
+                self._log("entry skipped: another strategy holds the symbol", time=now, px=px, want=want,
+                          other_shares=others, bands=self.last_bands)
+                self._save()
+                return
         if want != self.pos:
             self._trade(want, px, now)
         self._save()
