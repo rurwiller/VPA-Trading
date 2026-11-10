@@ -23,7 +23,8 @@ class FakeAlpaca:
         self.pos: dict[str, int] = {}
         self.n = itertools.count(1)
         self.reject_oco = False
-        self.cancel_lands = True               # False: a cancel is accepted but the order still shows as open
+        self.cancel_lands = True
+        self.bp = None                         # buying power; None = unlimited               # False: a cancel is accepted but the order still shows as open
         self.log: list[tuple] = []
 
     # ---- helpers for tests
@@ -86,6 +87,10 @@ class FakeAlpaca:
             o["legs"] = [self._new(client_order_id=b["client_order_id"] + "-sl", symbol=b["symbol"], side=b["side"], qty=b["qty"],
                                    type="stop", stop_price=b["stop_loss"]["stop_price"], status="held")]
             return Resp(o)
+        px = float(b.get("stop_price") or 100.0)
+        if self.bp is not None and b.get("order_class") == "bracket" and int(b["qty"]) * px * 1.03 > self.bp:
+            return Resp({"buying_power": f"{self.bp:.2f}", "code": 40310000, "cost_basis": f"{int(b['qty']) * px * 1.03:.2f}",
+                         "message": "insufficient buying power"}, 403)
         o = self._new(client_order_id=b.get("client_order_id", f"x{next(self.n)}"), symbol=b["symbol"], side=b["side"],
                       qty=b["qty"], type=b["type"], stop_price=b.get("stop_price"))
         if b["type"] == "market":

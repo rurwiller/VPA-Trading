@@ -17,6 +17,8 @@ Half at +0.5R (Config.half_at, 0 = off): once the entry fills, the bracket's two
   expectancy as all-at-1R, profitable trades 49% -> 65%.
 Session times come from Alpaca's calendar (close_minute): last entry 30 minutes before the close, flat 10 minutes before,
   so a 13:00 half day is handled (12:30 / 12:50).
+Buying power (Nov 10, the user's call): an entry Alpaca refuses for buying power is sent again at the size that fits
+  (same stop and target, so less at risk); skipped if under a quarter of the planned size fits. Logged as shrunk_from.
 Banks levels (Nov 10, the user's call): a PREMIER candle whose wick is at a posted level (data/levels/, within 0.25 ATR(5m))
   is traded even with no 1h / 4h / D gap, if the level fits the direction: a bottom candle at support / long trigger /
   downside target, a top candle at resistance / short trigger / upside target. Every other filter still applies (pivot,
@@ -461,10 +463,38 @@ class Engine:
             else:
                 p.status, p.exit_reason = "cancelled", f"price {mp} already {past:.2f} past the trigger (> half the stop distance)"
                 return
-        if r.ok:
+        if not r.ok and "insufficient buying power" in r.text:
+            r = self._shrink_to_fit(p, body, r)
+        if r is not None and r.ok:
             p.order_id, p.status = r.json()["id"], "submitted"
-        else:
+        elif r is not None:
             p.status, p.exit_reason = "cancelled", f"rejected: {r.text[:200]}"
+
+    MIN_FIT = 0.25      # shrink-to-fit: skip the trade if less than a quarter of the planned size fits
+
+    def _shrink_to_fit(self, p: Plan, body: dict, r):
+        """Alpaca refused the order for buying power: resend it at the size that fits (user's choice, Nov 10). Alpaca
+        reserves a little more than the order's value (about 3% on stop and market orders), so the size uses the
+        reserve it reported, with 2% to spare. Same stop and target: the dollars at risk shrink with the size."""
+        try:
+            j = r.json()
+            bp, cost = float(j["buying_power"]), float(j["cost_basis"])
+        except (ValueError, KeyError, TypeError):
+            return r
+        per_share = cost / p.qty                            # what Alpaca reserves per share of this order
+        q = int(0.98 * bp // per_share)
+        if q < max(1, math.ceil(self.MIN_FIT * p.qty)):
+            p.status, p.exit_reason = "cancelled", f"not enough buying power (only {max(q, 0)} of {p.qty} shares fit)"
+            return None
+        planned = p.qty
+        body = dict(body, qty=str(q), client_order_id=body["client_order_id"] + "-fit")
+        r2 = requests.post(TRADE + "/orders", headers=headers(), json=body, timeout=30)
+        if r2.ok:
+            p.qty = q
+            p.extra["shrunk_from"] = planned
+            print(f"    buying power: {p.sym} shrunk to fit, {q} of {planned} shares "
+                  f"(${abs(p.entry - p.stop) * q:,.0f} risk instead of ${abs(p.entry - p.stop) * planned:,.0f})", flush=True)
+        return r2
 
     def poll(self, p: Plan, last_bar: pd.Series | None, now: pd.Timestamp) -> None:
         o = requests.get(TRADE + f"/orders/{p.order_id}", headers=headers(), params={"nested": "true"}, timeout=30).json()

@@ -173,3 +173,33 @@ def test_level_trades_get_the_half_exits_too(api):
     api.bracket(cid, "TSLA", "buy", 100, 376.0, 375.0, 377.0)
     LV.Engine.manage_partials(0.5)
     assert api.by_cid(cid + "-h1")["limit_price"] == "376.50" and api.by_cid(cid + "-h2")["qty"] == "50"
+
+
+def entry_plan(qty=264):
+    e = LV.Engine(LV.Config(symbols=["TSLA"], risk_usd=1000, target="1R"), {}, {})
+    p = LV.Plan("TSLA", "9m", "premier", "PIVOT_WICK_TOP", -1, pd.Timestamp("2026-11-10 14:54"), 378.13, 379.40, 376.86,
+                379.37, qty, pd.Timestamp("2026-11-10 15:12"), "D")
+    return e, p
+
+
+def test_shrinks_to_fit_the_buying_power(api):
+    api.bp = 57_091.98                                     # what Alpaca had left at 13:00 MST on Nov 10
+    e, p = entry_plan()
+    e.submit(p)
+    assert p.status == "submitted" and p.extra["shrunk_from"] == 264
+    assert p.qty * 378.13 * 1.03 <= api.bp and p.qty >= 140   # 143 of 264 shares fit
+    assert api.by_cid("vpa-TSLA-9m-202611101454-fit")["qty"] == str(p.qty)
+
+
+def test_skips_when_almost_nothing_fits(api):
+    api.bp = 11_496.38                                     # 12:54 MST: 28 of 264 shares would fit, under a quarter
+    e, p = entry_plan()
+    e.submit(p)
+    assert p.status == "cancelled" and "not enough buying power" in p.exit_reason and len(api.parents()) == 0
+
+
+def test_full_size_when_it_fits(api):
+    api.bp = 400_000
+    e, p = entry_plan()
+    e.submit(p)
+    assert p.status == "submitted" and p.qty == 264 and "shrunk_from" not in p.extra
