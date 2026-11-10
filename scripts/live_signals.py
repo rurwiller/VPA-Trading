@@ -31,6 +31,7 @@ from vpa_trading import gex as GX, live as LV  # noqa: E402
 from vpa_trading.alert import AlertMode  # noqa: E402
 from vpa_trading.noise_band import NoiseBand  # noqa: E402
 from vpa_trading.terrashade import TerraShadeFeed  # noqa: E402
+from vpa_trading import levels as LVL  # noqa: E402
 
 MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
@@ -89,6 +90,16 @@ def refresh_gex(cfg: LV.Config, levels: dict, now: pd.Timestamp) -> None:
         out = Path("logs/gex") / f"{now:%Y-%m-%d}.csv"
         out.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows).to_csv(out, mode="a", header=not out.exists(), index=False)
+
+
+def tag_levels(p: LV.Plan, lv: pd.DataFrame, m: pd.DataFrame) -> None:
+    """Posted levels (data/levels/) within 0.25 ATR(5m) of the signal's wick."""
+    if lv is None or not len(lv):
+        return
+    a5 = float(LV.frame(m, "5m").atr.iloc[-1])
+    hits = LVL.near(lv, p.sym, p.wick, 0.25 * a5)
+    p.tags["levels"] = hits
+    print(f"    levels: {LVL.label(hits) if hits else 'none near the wick'}", flush=True)
 
 
 def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
@@ -172,6 +183,10 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     gex_levels: dict = {}
     gex_at = None
     ts = TerraShadeFeed(sorted(set(cfg.symbols) | set(breakout)))
+    posted = LVL.load(now)
+    if len(posted):
+        print(f"Posted levels loaded: {len(posted)} from {', '.join(sorted(posted.source.unique()))} "
+              f"({', '.join(sorted(posted.sym.unique()))})", flush=True)
     print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
     while True:
         now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
@@ -230,6 +245,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
                 if ts.tag(p.sym):
                     p.gex["terrashade"] = ts.tag(p.sym)
                 announce(p)
+                tag_levels(p, posted, m)
                 if paper:
                     eng.submit(p)
                 eng.log("signal", p)
@@ -245,6 +261,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
                 if ts.tag(p.sym):
                     p.gex["terrashade"] = ts.tag(p.sym)
                 announce_alert(p, why)
+                tag_levels(p, posted, m)
                 aeng.log("signal", p)
         time.sleep(max(1.0, 65 - (pd.Timestamp.now(tz="America/New_York").tz_localize(None) - boundary).total_seconds()))
     s = eng.summary()
