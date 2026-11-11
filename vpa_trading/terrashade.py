@@ -110,7 +110,10 @@ class TerraShadeFeed:
                 if t.normalize() != day and "after" in params:
                     continue
                 for sym, lv in parse(m, self.known).items():
-                    self.levels[sym] = {**self.levels.get(sym, {}), **lv, "asof": str(t), "channel": name}   # add, never replace
+                    old = self.levels.get(sym, {})
+                    if "alert" not in lv:        # a new levels card: an earlier price event no longer applies
+                        old = {k: v for k, v in old.items() if k != "alert"}
+                    self.levels[sym] = {**old, **lv, "asof": str(t), "channel": name}   # add, never replace
                     n += 1
         return n
 

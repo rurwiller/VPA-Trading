@@ -299,3 +299,21 @@ def test_key_zone_trade_needs_volume_and_a_strong_zone(monkeypatch):
     e.cfg.key_risk_usd = 0
     monkeypatch.setattr(L.vpa, "relvol_tod", lambda b: pd.Series([2.5]))
     assert e._at_key("X", m, now, "15m", 100.01, m) is None    # turned off
+
+
+def test_terrashade_new_card_clears_an_old_alert(monkeypatch, tmp_path):
+    from vpa_trading import terrashade as TS
+    posts = [{"id": "1", "timestamp": "2026-11-10T16:49:17+00:00", "embeds": [{"title": "TSLA · Alert",
+              "description": "**TSLA** moved below put wall **375.00**. Spot **374.97**."}]},
+             {"id": "2", "timestamp": "2026-11-11T14:48:00+00:00", "embeds": [{"title": "TSLA · Levels",
+              "description": "**TSLA** · 9:45 AM ET\nSpot **386.85**\nCall wall **390.00** (+0.8% from spot)\nPut wall **380.00** (-1.8% from spot)"}]}]
+
+    class R:
+        status_code, ok = 200, True
+        def __init__(self, d): self._d = d
+        def json(self): return self._d
+    monkeypatch.setattr(TS.requests, "get", lambda url, params=None, timeout=None: R(posts if "1569544610664022159" in url else []))
+    f = TS.TerraShadeFeed(["TSLA"], log_dir=tmp_path)
+    f.refresh(pd.Timestamp("2026-11-11 10:00"))
+    lv = f.tag("TSLA")
+    assert lv["put wall"] == 380.0 and lv["call wall"] == 390.0 and "alert" not in lv
