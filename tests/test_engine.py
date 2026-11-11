@@ -317,3 +317,25 @@ def test_terrashade_new_card_clears_an_old_alert(monkeypatch, tmp_path):
     f.refresh(pd.Timestamp("2026-11-11 10:00"))
     lv = f.tag("TSLA")
     assert lv["put wall"] == 380.0 and lv["call wall"] == 390.0 and "alert" not in lv
+
+
+def test_terrashade_applies_both_channels_in_time_order(monkeypatch, tmp_path):
+    """Nov 11: yesterday's alert (alerts channel) was applied after today's card (heatmap channel) and put the put wall back."""
+    from vpa_trading import terrashade as TS
+    card = {"id": "200", "timestamp": "2026-11-11T14:48:00+00:00", "embeds": [{"title": "TSLA · Levels",
+            "description": "**TSLA** · 9:45 AM ET\nSpot **386.85**\nCall wall **390.00** (+0.8% from spot)\nPut wall **380.00** (-1.8% from spot)"}]}
+    old_alert = {"id": "100", "timestamp": "2026-11-10T16:49:17+00:00", "embeds": [{"title": "TSLA · Alert",
+                 "description": "**TSLA** moved below put wall **375.00**. Spot **374.97**."}]}
+    new_alert = {"id": "300", "timestamp": "2026-11-11T15:13:00+00:00", "embeds": [{"title": "TSLA · Alert",
+                 "description": "**TSLA** moved above call wall **390.00**. Spot **391.20**."}]}
+
+    class R:
+        status_code, ok = 200, True
+        def __init__(self, d): self._d = d
+        def json(self): return self._d
+    monkeypatch.setattr(TS.requests, "get", lambda url, params=None, timeout=None:
+                        R([card] if "1569544610664022159" in url else [new_alert, old_alert]))
+    f = TS.TerraShadeFeed(["TSLA"], log_dir=tmp_path)
+    f.refresh(pd.Timestamp("2026-11-11 10:30"))
+    lv = f.tag("TSLA")
+    assert lv["put wall"] == 380.0 and lv["call wall"] == 390.0 and lv["alert"] == "moved above call wall 390"

@@ -80,12 +80,14 @@ class TerraShadeFeed:
         self.ok = True
 
     def refresh(self, now: pd.Timestamp) -> int:
-        """Read new posts if it is time. Returns how many new posts were read."""
+        """Read new posts if it is time. Returns how many new posts were read. Posts from both channels are applied in
+        the order they were posted, so an older alert never overwrites a newer levels card."""
         if not self.ok or (self.at is not None and now - self.at < self.every):
             return 0
         self.at = now
         n = 0
         day = now.normalize()
+        new = []
         for name, cid in CHANNELS.items():
             params = {"limit": 50}
             if cid in self.after:
@@ -105,16 +107,15 @@ class TerraShadeFeed:
             with open(self.log_dir / f"{day:%Y-%m-%d}.jsonl", "a") as f:
                 for m in msgs:
                     f.write(json.dumps({"channel": name, **m}) + "\n")
-            for m in msgs:
-                t = pd.Timestamp(m["timestamp"]).tz_convert("America/New_York").tz_localize(None)
-                if t.normalize() != day and "after" in params:
-                    continue
-                for sym, lv in parse(m, self.known).items():
-                    old = self.levels.get(sym, {})
-                    if "alert" not in lv:        # a new levels card: an earlier price event no longer applies
-                        old = {k: v for k, v in old.items() if k != "alert"}
-                    self.levels[sym] = {**old, **lv, "asof": str(t), "channel": name}   # add, never replace
-                    n += 1
+            new += [(name, m) for m in msgs]
+        for name, m in sorted(new, key=lambda x: int(x[1]["id"])):     # Discord ids grow with time across channels
+            t = pd.Timestamp(m["timestamp"]).tz_convert("America/New_York").tz_localize(None)
+            for sym, lv in parse(m, self.known).items():
+                old = self.levels.get(sym, {})
+                if "alert" not in lv:        # a new levels card: an earlier price event no longer applies
+                    old = {k: v for k, v in old.items() if k != "alert"}
+                self.levels[sym] = {**old, **lv, "asof": str(t), "channel": name}   # add, never replace
+                n += 1
         return n
 
     def tag(self, sym: str) -> dict:
