@@ -595,15 +595,24 @@ class Engine:
     @staticmethod
     def flatten() -> None:
         """Cancel every order, then close every position, retrying until Alpaca shows none (closes finish a moment later)."""
-        for k in range(8):                    # a network error here must not leave positions open: keep trying
+        # Cancel every order once, then close every position. A retry must NOT cancel orders again: that would cancel
+        # the closing market orders of the previous attempt while they fill (Nov 12: two TSLA closes cancelled that way).
+        # So retries only wait, and re-send a close for a position that has no closing order working.
+        for k in range(12):                   # about a minute in all; a network error must not leave positions open
             try:
                 if k == 0:
                     requests.delete(TRADE + "/orders", headers=headers(), timeout=30)
                     time.sleep(3)
-                requests.delete(TRADE + "/positions", headers=headers(), params={"cancel_orders": "true"}, timeout=30)
+                    requests.delete(TRADE + "/positions", headers=headers(), timeout=30)
                 time.sleep(4)
-                if requests.get(TRADE + "/positions", headers=headers(), timeout=30).json() == []:
+                pos = requests.get(TRADE + "/positions", headers=headers(), timeout=30).json()
+                if pos == []:
                     return
+                working = {o["symbol"] for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"},
+                                                             timeout=30).json()}
+                for x in pos:
+                    if x["symbol"] not in working:      # nothing is closing it: send a close for this one position
+                        requests.delete(TRADE + f"/positions/{x['symbol']}", headers=headers(), timeout=30)
             except requests.RequestException as e:
                 print(f"!! flatten attempt {k + 1} failed: {e}", flush=True)
                 time.sleep(5)

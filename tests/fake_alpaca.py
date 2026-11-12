@@ -24,6 +24,7 @@ class FakeAlpaca:
         self.n = itertools.count(1)
         self.reject_oco = False
         self.cancel_lands = True
+        self.slow_close = False                # True: DELETE /positions leaves a working close order instead of closing
         self.bp = None                         # buying power; None = unlimited               # False: a cancel is accepted but the order still shows as open
         self.log: list[tuple] = []
 
@@ -113,5 +114,14 @@ class FakeAlpaca:
                 if o["status"] in ("new", "held", "accepted"):
                     o["status"] = "canceled"
         elif path == "/positions":
-            self.pos.clear()
+            self.log.append(("close_all", dict(params or {})))
+            if self.slow_close:              # the close is a market order that has not filled yet
+                for s_, q in list(self.pos.items()):
+                    if q:
+                        self._new(client_order_id=f"close-{s_}", symbol=s_, side="buy" if q < 0 else "sell", qty=str(abs(q)), type="market")
+            else:
+                self.pos.clear()
+        elif path.startswith("/positions/"):
+            self.log.append(("close_one", path))
+            self.pos.pop(path.split("/")[2], None)
         return Resp({}, 204)

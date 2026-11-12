@@ -228,3 +228,25 @@ def test_key_level_trades_get_the_half_exits_too(api):
     api.bracket(cid, "TSLA", "sell", 60, 384.0, 389.0, 379.0)
     LV.Engine.manage_partials(0.5)
     assert api.by_cid(cid + "-h1")["limit_price"] == "381.50" and api.by_cid(cid + "-h2")["qty"] == "30"
+
+
+def test_flatten_waits_for_a_slow_close_and_never_cancels_it(api, monkeypatch):
+    """Nov 12: retries cancelled the previous attempt's closing order while it filled."""
+    api.pos["TSLA"] = -234
+    api.slow_close = True
+    calls = {"n": 0}
+    real_get = api.get
+
+    def get(url, **kw):
+        if url.endswith("/positions"):
+            calls["n"] += 1
+            if calls["n"] == 3:                  # the close fills on the third look
+                close = api.by_cid("close-TSLA")
+                if close and close["status"] == "new":
+                    api.fill(close, 397.40)
+        return real_get(url, **kw)
+    monkeypatch.setattr(LV.requests, "get", get)
+    LV.Engine.flatten()
+    assert api.pos["TSLA"] == 0
+    assert api.by_cid("close-TSLA")["status"] == "filled"                 # never cancelled
+    assert [x for x in api.log if x[0] == "close_all"] == [("close_all", {})]   # one close-all, no cancel_orders retries
