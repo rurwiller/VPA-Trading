@@ -77,7 +77,8 @@ def run(sym, side, gap, ks, kt, cost):
                     if (side < 0 and l[k, t] <= tgt) or (side > 0 and h[k, t] >= tgt):
                         out, why = tgt, "target"
                         break
-                rows.append({"day": C.index[k], "bps": side * (out / e - 1) * 1e4 - cost, "why": why})
+                rows.append({"day": C.index[k], "bps": side * (out / e - 1) * 1e4 - cost, "why": why,
+                             "time": C.index[k] + pd.Timedelta(minutes=570 + j + 1)})      # when the entry block closed
                 break
     return pd.DataFrame(rows)
 
