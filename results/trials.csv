@@ -11,3 +11,13 @@ logged_utc,study,variant,n,mean,t,unit,note
 2026-11-21 23:51,htf_candles,daily hammer weekly<10 trade,25143,0.0000,nan,R,"logged after the fact, Nov 21 2026"
 2026-11-21 23:51,htf_candles,weekly hammer weekly<10 +20d,7455,0.6000,5.80,%,"logged after the fact, Nov 21 2026"
 2026-11-21 23:51,htf_candles,daily star weekly>90 SPY<200 +20d,6407,-1.9000,-14.30,%,"logged after the fact, Nov 21 2026"
+2026-11-21 23:54,regime_test,regime buckets x 4 strategy columns (discovery),29441,nan,nan,,48 cells compared
+2026-11-21 23:55,breakout_symbols,AAPL,1122,-0.9334,-0.48,bps/day,
+2026-11-21 23:55,breakout_symbols,AMD,1122,6.9285,2.20,bps/day,
+2026-11-21 23:55,breakout_symbols,AMZN,1122,-0.9110,-0.42,bps/day,
+2026-11-21 23:55,breakout_symbols,GOOGL,1119,-0.8354,-0.43,bps/day,
+2026-11-21 23:55,breakout_symbols,META,1119,-0.9227,-0.38,bps/day,
+2026-11-21 23:55,breakout_symbols,MSFT,1119,-0.8722,-0.49,bps/day,
+2026-11-21 23:55,breakout_symbols,NVDA,1122,2.5885,0.87,bps/day,
+2026-11-21 23:55,breakout_symbols,QQQ,1123,3.8121,2.62,bps/day,
+2026-11-21 23:55,breakout_symbols,TSLA,1124,6.7024,2.11,bps/day,
