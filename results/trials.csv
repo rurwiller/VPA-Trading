@@ -21,3 +21,4 @@ logged_utc,study,variant,n,mean,t,unit,note
 2026-11-21 23:55,breakout_symbols,NVDA,1122,2.5885,0.87,bps/day,
 2026-11-21 23:55,breakout_symbols,QQQ,1123,3.8121,2.62,bps/day,
 2026-11-21 23:55,breakout_symbols,TSLA,1124,6.7024,2.11,bps/day,
+2026-11-21 23:58,rs_test,9 RS filters x long/short (discovery),25973,nan,nan,,
