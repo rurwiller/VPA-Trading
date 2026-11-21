@@ -75,7 +75,7 @@ def at_gap(lows, closes, gaps, k, formed_before):
     for i, bot, top in gaps:
         if not formed_before(i, k):
             continue
-        prior = lows[i + 1:k] if isinstance(k, int) else lows[i + 1:]
+        prior = lows[i + 1:k]            # only bars before k (a numpy-int k once made this look at the future)
         if len(prior) and prior.min() < bot:                                # already filled
             continue
         if lows[k] <= top and closes[k] >= bot:
@@ -182,11 +182,13 @@ def main():
             line("daily gap + 1h turn", e[e.dgap], "turn")]
     g = ev[ev.dgap].dropna(subset=["base10"])
     m = g.groupby(g.day.dt.to_period("M")).base10.mean()
-    L += ["\n## Is the daily-gap result real?\n",
-          f"Setups bunch up (9 in March 2023), so averaging by month first: {len(m)} months, +10 days "
+    L += ["\n## The daily-gap check, after fixing a look-ahead bug\n",
+          "An earlier version of this report showed the daily gap as a huge edge (+6% in 10 days, 88% beating the usual move). "
+          "That was a bug: the 'gap still unfilled' test also looked at prices AFTER the setup day, so it kept only gaps "
+          "that price never went back below. Fixed on Nov 21 2026; the numbers in this report are the corrected ones.",
+          f"Averaging by month first: {len(m)} months, +10 days "
           f"{m.mean():+.2f}% (t {m.mean() / (m.std() / np.sqrt(len(m))):+.1f}). Median setup {g.base10.median():+.2f}%, "
-          f"worst {g.base10.min():+.1f}%. A daily gap below price means the stock had gapped up shortly before, so this is "
-          "an oversold pullback inside an uptrend.",
+          f"worst {g.base10.min():+.1f}%.",
           "\n## Every daily-gap setup\n", "| Day | Stock | Daily | Weekly | +5 days | +10 days | +20 days |",
           "|---|---|--:|--:|--:|--:|--:|"]
     for _, r in ev[ev.dgap].sort_values("day").iterrows():
