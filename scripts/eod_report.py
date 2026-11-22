@@ -3,7 +3,7 @@
   python scripts/eod_report.py [YYYY-MM-DD]      (default: today)
 
 One row per piece of a position (a breakout sold in thirds is three rows). Entries and exits are matched first-in-first-out per
-symbol; strategy comes from the order id prefix (vpa- candle scanner, alert- alert mode, nb- TSLA breakout). Times are MST.
+symbol; strategy comes from the order id prefix (vpa- candle scanner, alert- alert mode, nb- trend-day breakout on TSLA / QQQ). Times are MST.
 Also lists the signals that never traded (from logs/live/<date>.jsonl) and the account's equity change.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vpa_trading import live as LV  # noqa: E402
 
-STRAT = {"vpa-": "Candle scanner", "alert-": "Alert mode", "lvl-": "Banks level", "key-": "Key level", "nb-": "TSLA breakout"}
+STRAT = {"vpa-": "Candle scanner", "alert-": "Alert mode", "lvl-": "Banks level", "key-": "Key level", "nb-": "Trend-day breakout"}
 MST = "America/Denver"
 
 

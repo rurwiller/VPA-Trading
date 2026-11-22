@@ -53,6 +53,23 @@ from .data import resample_bars
 DATA = "https://data.alpaca.markets/v2/stocks/bars"
 TRADE = "https://paper-api.alpaca.markets/v2"
 PART = ("-h1", "-h2", "-h3", "-hm")      # suffixes of the half-at-+0.5R exit orders (hm = closed at market)
+
+
+def entry_deadline(cid: str):
+    """When an entry order from submit() stops being valid: its signal close (in the id, ET) + 2 candles of its
+    timeframe, as Plan.valid_until. None if the id does not have that shape (e.g. a market entry)."""
+    parts = cid.split("-")
+    if len(parts) < 4 or not parts[2].endswith("m") or not parts[2][:-1].isdigit():
+        return None
+    try:
+        t = pd.to_datetime(parts[3], format="%Y%m%d%H%M")
+    except ValueError:
+        return None
+    if len(parts) > 4 and parts[4] != "fit":  # -mkt: entered at market, never a resting stop entry (-fit is resized, still resting)
+        return None
+    return t + 2 * pd.Timedelta(minutes=int(parts[2][:-1]))
+
+
 OPEN = {"new", "accepted", "held", "pending_new", "partially_filled", "pending_replace", "accepted_for_bidding"}
 GAP_SESSIONS = {"1h": 5, "4h": 20, "D": 60}
 CLIMAX_TYPES = {"SELLING_CLIMAX", "BUYING_CLIMAX", "STOPPING_VOLUME", "TOPPING_OUT_VOLUME"}
@@ -619,16 +636,48 @@ class Engine:
         print("!! FLATTEN DID NOT CONFIRM: positions may still be open at Alpaca", flush=True)
 
     @staticmethod
-    def cancel_stale_entries() -> int:
-        """At startup: cancel unfilled entry orders from an earlier run of the scanner (it no longer tracks them, so they
-        would never be cancelled when their window ends and could fill hours later). Filled positions keep their brackets."""
+    def cancel_stale_entries(now: pd.Timestamp | None = None) -> int:
+        """At startup: unfilled entry orders left by an earlier run of the scanner. Orders still inside their window
+        (signal close + 2 candles, read from the client order id) are ADOPTED: kept working, and expire_adopted() cancels
+        them when the window ends or the price runs through their stop first, as the run that placed them would have.
+        Orders past their window, or whose id cannot be read, are cancelled. Filled positions keep their brackets.
+        Returns the number cancelled."""
+        now = now if now is not None else pd.Timestamp.now(tz="America/New_York").tz_localize(None)
         n = 0
         for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json():
-            if o["client_order_id"].startswith(("vpa-", "alert-", "lvl-", "key-")) and not o["client_order_id"].endswith(PART) \
+            cid = o["client_order_id"]
+            if cid.startswith(("vpa-", "alert-", "lvl-", "key-")) and not cid.endswith(PART) \
                     and o.get("order_class") != "oco" and o.get("filled_qty") in (None, "0"):
+                dl = entry_deadline(cid)
+                if dl is not None and now < dl:
+                    stop = next((float(lg["stop_price"]) for lg in o.get("legs") or [] if lg.get("stop_price")), None)
+                    Engine.adopted[o["id"]] = {"cid": cid, "sym": o["symbol"], "deadline": dl, "stop": stop,
+                                               "side": 1 if o["side"] == "buy" else -1}
+                    continue
                 requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
                 n += 1
         return n
+
+    adopted: dict = {}      # order id -> entry order kept working across a restart (see cancel_stale_entries)
+
+    @classmethod
+    def expire_adopted(cls, now: pd.Timestamp, last_bars: dict | None = None) -> list[str]:
+        """Call once a minute. Cancels adopted entries whose window has ended, or whose price traded through the stop
+        before the entry triggered (last_bars: symbol -> the last finished 1m bar). Returns the client ids cancelled."""
+        gone = []
+        for oid, a in list(cls.adopted.items()):
+            o = cls._order(oid)
+            if o.get("status") not in ("new", "held", "accepted", "pending_new") or o.get("filled_qty") not in (None, "0"):
+                del cls.adopted[oid]                 # filled (its exits are managed like any bracket) or already gone
+                continue
+            bar = (last_bars or {}).get(a["sym"])
+            through = bar is not None and a["stop"] is not None and \
+                ((a["side"] > 0 and float(bar["low"]) <= a["stop"]) or (a["side"] < 0 and float(bar["high"]) >= a["stop"]))
+            if now >= a["deadline"] or through:
+                requests.delete(TRADE + f"/orders/{oid}", headers=headers(), timeout=30)
+                del cls.adopted[oid]
+                gone.append(a["cid"] + (" (price hit the stop first)" if through and now < a["deadline"] else " (window ended)"))
+        return gone
 
     # ---------------------------------------------------------------- half at +0.5R (live)
     @staticmethod

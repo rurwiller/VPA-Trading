@@ -250,3 +250,45 @@ def test_flatten_waits_for_a_slow_close_and_never_cancels_it(api, monkeypatch):
     assert api.pos["TSLA"] == 0
     assert api.by_cid("close-TSLA")["status"] == "filled"                 # never cancelled
     assert [x for x in api.log if x[0] == "close_all"] == [("close_all", {})]   # one close-all, no cancel_orders retries
+
+
+def _resting_entry(api, cid, sym="AAPL", side="buy", stop=99.0):
+    o = api._new(client_order_id=cid, symbol=sym, side=side, qty="10", type="stop", stop_price="101", order_class="bracket")
+    o["legs"] = [api._new(client_order_id=cid + "-sl", symbol=sym, side="sell" if side == "buy" else "buy", qty="10",
+                          type="stop", stop_price=str(stop), status="held")]
+    return o
+
+
+def test_restart_keeps_an_entry_inside_its_window_then_cancels_it(api):
+    LV.Engine.adopted = {}
+    o = _resting_entry(api, "vpa-AAPL-9m-202611231000")          # valid until 10:18
+    assert LV.Engine.cancel_stale_entries(pd.Timestamp("2026-11-23 10:05")) == 0
+    assert o["status"] == "new" and o["id"] in LV.Engine.adopted
+    assert LV.Engine.expire_adopted(pd.Timestamp("2026-11-23 10:10")) == [] and o["status"] == "new"
+    gone = LV.Engine.expire_adopted(pd.Timestamp("2026-11-23 10:18"))
+    assert o["status"] == "canceled" and gone and "window ended" in gone[0] and not LV.Engine.adopted
+
+
+def test_kept_entry_is_cancelled_when_price_hits_its_stop_first(api):
+    LV.Engine.adopted = {}
+    o = _resting_entry(api, "alert-AAPL-5m-202611231000", stop=99.0)
+    LV.Engine.cancel_stale_entries(pd.Timestamp("2026-11-23 10:02"))
+    LV.Engine.expire_adopted(pd.Timestamp("2026-11-23 10:03"), {"AAPL": {"low": 98.9, "high": 100.0}})
+    assert o["status"] == "canceled"
+
+
+def test_kept_entry_that_fills_is_left_to_the_normal_exit_handling(api):
+    LV.Engine.adopted = {}
+    o = _resting_entry(api, "vpa-AAPL-15m-202611231000")
+    LV.Engine.cancel_stale_entries(pd.Timestamp("2026-11-23 10:05"))
+    api.fill(o, 101.0)
+    LV.Engine.expire_adopted(pd.Timestamp("2026-11-23 10:40"))
+    assert o["status"] == "filled" and not LV.Engine.adopted
+
+
+def test_restart_still_cancels_entries_past_their_window_and_market_ids(api):
+    LV.Engine.adopted = {}
+    late = _resting_entry(api, "vpa-AAPL-9m-202611230900")
+    odd = _resting_entry(api, "vpa-MSFT-9m-202611231000-mkt", sym="MSFT")
+    assert LV.Engine.cancel_stale_entries(pd.Timestamp("2026-11-23 10:05")) == 2
+    assert late["status"] == odd["status"] == "canceled" and not LV.Engine.adopted

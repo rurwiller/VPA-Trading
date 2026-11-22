@@ -246,9 +246,11 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     aeng = LV.Engine(replace(cfg, risk_usd=alert_risk, families=("premier",), require_gap=False), hist, daily)
     alert = AlertMode(aeng) if alert_risk else None
     if paper:
-        n_stale = LV.Engine.cancel_stale_entries()
+        n_stale = LV.Engine.cancel_stale_entries(now.floor("min"))
         if n_stale:
-            print(f"Cancelled {n_stale} unfilled entry order(s) left by an earlier run", flush=True)
+            print(f"Cancelled {n_stale} unfilled entry order(s) left by an earlier run (past their window)", flush=True)
+        for a in LV.Engine.adopted.values():
+            print(f"Kept working from an earlier run: {a['cid']} (cancelled at {a['deadline']:%H:%M} ET if not triggered)", flush=True)
     if alert:
         print(f"Candle alert mode on 5m/9m/15m: pivot wick + volume surge + stretch from the 15m EMA 9 + oscillators, "
               f"${alert_risk:,.0f} risk per trade", flush=True)
@@ -327,6 +329,10 @@ def minute_step(cfg, paper, boundary, syms, hist, eng, aeng, alert, nbs, ts, pos
     except Exception as e:      # optional data: never stop the scanner
         print(f"TerraShade feed error: {e}", flush=True)
     today = fetch_today(syms, boundary)
+    if paper and LV.Engine.adopted:          # entry orders kept across a restart: cancel them when their window ends
+        last = {s_: t_[t_.index < boundary].iloc[-1] for s_, t_ in today.items() if len(t_[t_.index < boundary])}
+        for cid in LV.Engine.expire_adopted(boundary, last):
+            print(f"[{mst(boundary)} MST] cancelled kept-over entry {cid}", flush=True)
     eng.external = {nb.sym: nb.pos for nb in nbs}   # the candle scanner may add to the breakout's direction, never oppose it
     for q in aeng.plans:
         if q.status == "filled":
