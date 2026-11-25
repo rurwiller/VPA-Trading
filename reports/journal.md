@@ -5,7 +5,7 @@ scanner's own log (logs/live/<day>.jsonl) by symbol and fill time, which adds th
 key-level zone, planned entry / stop, and so slippage and the result in R. Market regime (vpa_trading/regime.py, known
 before the session) and time of day are added for every position. Rebuilt in full each run.
 
-105 positions, 2026-11-04 to 2026-11-24; 89 with a logged plan (R known). Total P/L +870. Small samples: read these as a running record, not conclusions, until each row has 30+ trades.
+115 positions, 2026-11-04 to 2026-11-25; 98 with a logged plan (R known). Total P/L -2,245. Small samples: read these as a running record, not conclusions, until each row has 30+ trades.
 
 
 ## By strategy
@@ -14,17 +14,17 @@ before the session) and time of day are added for every position. Rebuilt in ful
 |---|--:|--:|--:|--:|
 | Alert mode | 13 | 54% | -117 | -0.16 |
 | Banks level | 3 | 33% | +214 | -0.16 |
-| Candle scanner | 76 | 61% | -1,396 | -0.02 |
-| Trend-day breakout | 13 | 62% | +2,169 | - |
+| Candle scanner | 85 | 55% | -4,397 | -0.11 |
+| Trend-day breakout | 14 | 57% | +2,055 | - |
 
 ## By timeframe (scanner and alert trades)
 
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
-| 15m | 18 | 61% | +603 | +0.03 |
+| 15m | 23 | 48% | -1,370 | -0.19 |
 | 2m | 4 | 100% | +907 | +0.93 |
 | 5m | 14 | 43% | -2,286 | -0.34 |
-| 9m | 53 | 60% | -562 | -0.07 |
+| 9m | 57 | 58% | -1,590 | -0.11 |
 
 ## By candle type
 
@@ -35,8 +35,8 @@ before the session) and time of day are added for every position. Rebuilt in ful
 | HAMMER | 10 | 60% | -669 | +0.06 |
 | HANGING_MAN | 1 | 0% | -282 | -1.09 |
 | PIVOT_WICK_BOTTOM | 8 | 62% | +123 | -0.08 |
-| PIVOT_WICK_TOP | 39 | 67% | +1,121 | +0.05 |
-| SHOOTING_STAR | 10 | 50% | -1,190 | -0.29 |
+| PIVOT_WICK_TOP | 47 | 57% | -1,398 | -0.09 |
+| SHOOTING_STAR | 11 | 45% | -1,672 | -0.37 |
 | SHOOTING_STAR_IN_DOWNTREND | 1 | 0% | -437 | -1.09 |
 | STOPPING_VOLUME | 1 | 0% | -704 | -1.02 |
 | single-bar climax bottom | 2 | 100% | +400 | +1.03 |
@@ -47,34 +47,34 @@ before the session) and time of day are added for every position. Rebuilt in ful
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
 | - | 9 | 56% | -351 | -0.23 |
-| 1h | 31 | 71% | +602 | +0.11 |
-| 4h | 22 | 68% | +1,833 | +0.16 |
-| D | 24 | 42% | -3,636 | -0.36 |
+| 1h | 37 | 62% | -1,466 | -0.04 |
+| 4h | 23 | 65% | +1,440 | +0.11 |
+| D | 26 | 38% | -4,176 | -0.40 |
 | level | 3 | 33% | +214 | -0.16 |
 
 ## Key-level zone at entry
 
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
-| at a zone | 23 | 43% | -3,756 | -0.36 |
-| no zone | 66 | 65% | +2,418 | +0.06 |
+| at a zone | 26 | 42% | -4,581 | -0.39 |
+| no zone | 72 | 60% | +242 | -0.02 |
 
 ## Add to an open position?
 
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
-| False | 82 | 60% | -1,568 | -0.06 |
+| False | 91 | 55% | -4,570 | -0.13 |
 | True | 7 | 57% | +230 | +0.06 |
 
 ## Hour of entry (MST)
 
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
-| 8 | 19 | 53% | +1,301 | -0.19 |
+| 8 | 20 | 50% | +1,187 | -0.19 |
 | 9 | 22 | 64% | +535 | -0.02 |
-| 10 | 25 | 60% | -464 | +0.04 |
-| 11 | 19 | 53% | -1,072 | -0.25 |
-| 12 | 13 | 77% | +1,380 | +0.19 |
+| 10 | 26 | 62% | -320 | +0.05 |
+| 11 | 24 | 42% | -3,524 | -0.44 |
+| 12 | 16 | 62% | +687 | -0.01 |
 | 13 | 7 | 43% | -810 | -0.03 |
 
 ## Side
@@ -82,15 +82,15 @@ before the session) and time of day are added for every position. Rebuilt in ful
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
 | long | 35 | 63% | +245 | +0.04 |
-| short | 70 | 57% | +625 | -0.09 |
+| short | 80 | 51% | -2,490 | -0.19 |
 
 ## SPY vs its 200-day (as of the prior close)
 
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
 | above | 73 | 56% | -127 | -0.06 |
-| below | 24 | 67% | +1,398 | +0.02 |
-| nan | 8 | 62% | -401 | -0.16 |
+| below | 32 | 66% | +997 | -0.03 |
+| nan | 10 | 10% | -3,115 | -0.84 |
 
 ## SPY volatility
 
@@ -98,9 +98,9 @@ before the session) and time of day are added for every position. Rebuilt in ful
 |---|--:|--:|--:|--:|
 | calm | 11 | 55% | -405 | +0.13 |
 | normal | 5 | 20% | +61 | -1.15 |
-| stressed | 81 | 62% | +1,615 | -0.03 |
-| nan | 8 | 62% | -401 | -0.16 |
+| stressed | 89 | 62% | +1,214 | -0.04 |
+| nan | 10 | 10% | -3,115 | -0.84 |
 
 ## Slippage (entry fill vs the planned entry, in R; negative = paid more than planned)
 
-Average -0.062R, median -0.041R, worst -0.42R over 89 trades.
+Average -0.067R, median -0.042R, worst -0.42R over 98 trades.
