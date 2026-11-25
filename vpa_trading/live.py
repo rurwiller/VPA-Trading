@@ -52,6 +52,7 @@ from .data import resample_bars
 
 DATA = "https://data.alpaca.markets/v2/stocks/bars"
 TRADE = "https://paper-api.alpaca.markets/v2"
+KEEP_OVERNIGHT = {"QQQM"}                 # held overnight by the QQQ 200-day trend sleeve (vpa_trading/trend.py)
 PART = ("-h1", "-h2", "-h3", "-hm")      # suffixes of the half-at-+0.5R exit orders (hm = closed at market)
 
 
@@ -632,19 +633,33 @@ class Engine:
         self.busy = ({x["symbol"] for x in pos} | {x["symbol"] for x in orders}) - mine
 
     @staticmethod
-    def flatten() -> None:
-        """Cancel every order, then close every position, retrying until Alpaca shows none (closes finish a moment later)."""
+    def flatten(keep: set | None = None) -> None:
+        """Cancel every order, then close every position, retrying until Alpaca shows none (closes finish a moment later).
+        Symbols in `keep` (default KEEP_OVERNIGHT: the QQQ trend sleeve's QQQM) keep their position and their orders."""
+        keep = KEEP_OVERNIGHT if keep is None else keep
         # Cancel every order once, then close every position. A retry must NOT cancel orders again: that would cancel
         # the closing market orders of the previous attempt while they fill (Nov 12: two TSLA closes cancelled that way).
         # So retries only wait, and re-send a close for a position that has no closing order working.
         for k in range(12):                   # about a minute in all; a network error must not leave positions open
             try:
                 if k == 0:
-                    requests.delete(TRADE + "/orders", headers=headers(), timeout=30)
-                    time.sleep(3)
-                    requests.delete(TRADE + "/positions", headers=headers(), timeout=30)
+                    held = requests.get(TRADE + "/positions", headers=headers(), timeout=30).json()
+                    orders = requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json()
+                    if not any(x["symbol"] in keep for x in held + orders):
+                        requests.delete(TRADE + "/orders", headers=headers(), timeout=30)
+                        time.sleep(3)
+                        requests.delete(TRADE + "/positions", headers=headers(), timeout=30)
+                    else:                     # one by one, leaving the kept symbols alone
+                        for o in orders:
+                            if o["symbol"] not in keep:
+                                requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
+                        time.sleep(3)
+                        for x in held:
+                            if x["symbol"] not in keep:
+                                requests.delete(TRADE + f"/positions/{x['symbol']}", headers=headers(), timeout=30)
                 time.sleep(4)
-                pos = requests.get(TRADE + "/positions", headers=headers(), timeout=30).json()
+                pos = [x for x in requests.get(TRADE + "/positions", headers=headers(), timeout=30).json()
+                       if x["symbol"] not in keep]
                 if pos == []:
                     return
                 working = {o["symbol"] for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"},

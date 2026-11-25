@@ -36,6 +36,7 @@ from vpa_trading.noise_band import NoiseBand  # noqa: E402
 from vpa_trading.terrashade import TerraShadeFeed  # noqa: E402
 from vpa_trading import levels as LVL  # noqa: E402
 from vpa_trading import keylevels as KL  # noqa: E402
+from vpa_trading import trend as TR  # noqa: E402
 
 MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
 
@@ -184,10 +185,13 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
 
 
 def day_pnl() -> float | None:
-    """Today's change in account equity (open + closed trades), straight from Alpaca. None if it cannot be read."""
+    """Today's change in account equity (open + closed trades) from Alpaca, without the overnight trend sleeve's move.
+    None if it cannot be read."""
     try:
         a = requests.get(LV.TRADE + "/account", headers=LV.headers(), timeout=30).json()
-        return float(a["equity"]) - float(a["last_equity"])
+        pos = requests.get(LV.TRADE + "/positions", headers=LV.headers(), timeout=30).json()
+        sleeve = sum(float(x.get("unrealized_intraday_pl") or 0) for x in pos if x["symbol"] in LV.KEEP_OVERNIGHT)
+        return float(a["equity"]) - float(a["last_equity"]) - sleeve     # the trend sleeve's daily swing does not count
     except Exception:
         return None
 
@@ -229,7 +233,8 @@ def log_buying_power(boundary: pd.Timestamp) -> None:
 
 
 def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True,
-         osc_trim: tuple | None = (80.0, 0.5), max_daily_loss: float = 0.0, vol_budget: float = 0.0) -> None:
+         osc_trim: tuple | None = (80.0, 0.5), max_daily_loss: float = 0.0, vol_budget: float = 0.0,
+         trend_notional: float = 0.0) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
@@ -237,6 +242,7 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
     cfg.close_min = LV.close_minute(now)
     flat_at = pd.Timedelta(hours=9, minutes=30 + cfg.close_min - 10)
+    trend_at = pd.Timedelta(hours=9, minutes=30 + cfg.close_min - 15)
     if cfg.close_min != 390:
         print(f"Short session: the market closes {cfg.close_min} minutes after the open. Last entries 30 minutes before, "
               f"everything flat 10 minutes before.", flush=True)
@@ -263,6 +269,9 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
         nb.start_day(hist[sym], None, now.normalize())
         nbs.append(nb)
         print(f"Trend-day breakout on {sym}: ${nb.day_notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
+    if trend_notional:
+        print(f"QQQ 200-day trend sleeve: ${trend_notional:,.0f} of {TR.TRADE_SYM} held while QQQ is above its 200-day "
+              f"average, checked 15 min before the close (market-on-close order)", flush=True)
     if cfg.max_shorts:
         print(f"Short cap: the candle scanner and alert mode are short at most {cfg.max_shorts} stocks at once", flush=True)
     if max_daily_loss:
@@ -286,6 +295,13 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     while True:
         now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
         boundary = st["boundary"] = now.floor("min")
+        if paper and trend_notional and boundary - boundary.normalize() >= trend_at:
+            try:                                 # QQQ 200-day trend sleeve: once a day, 15 min before the close, halt or not
+                msg = TR.rebalance(trend_notional, boundary)
+                if msg:
+                    print(f"[{mst(boundary)} MST] TREND {msg}", flush=True)
+            except Exception as e:               # noqa: BLE001
+                print(f"[{mst(boundary)} MST] TREND check failed: {e}", flush=True)
         if boundary - boundary.normalize() >= flat_at:
             if paper:
                 LV.Engine.flatten()
@@ -444,6 +460,8 @@ def main() -> None:
                     "use with --alert-risk 0 to turn the candle alerts off too")
     ap.add_argument("--breakout-vol-budget", type=float, default=0.0, help="breakout: size each trade so a typical day's "
                     "move is worth this many dollars (notional = budget / 20-day daily volatility, max $150k); 0 = fixed --breakout-notional")
+    ap.add_argument("--trend-qqq", type=float, default=0.0, help="QQQ 200-day trend sleeve: dollars of QQQM held while "
+                    "QQQ is above its 200-day average (0 = off)")
     ap.add_argument("--max-shorts", type=int, default=0, help="most stocks the candle scanner / alert mode may be short at once (0 = no cap)")
     ap.add_argument("--max-daily-loss", type=float, default=0.0, help="close everything and stop for the day once the account is down this many dollars (0 = off)")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
@@ -460,7 +478,7 @@ def main() -> None:
                None if a.no_breakout_trim else (80.0, 0.5), a.breakout_vol_budget)
     else:
         live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit,
-             None if a.no_breakout_trim else (80.0, 0.5), a.max_daily_loss, a.breakout_vol_budget)
+             None if a.no_breakout_trim else (80.0, 0.5), a.max_daily_loss, a.breakout_vol_budget, a.trend_qqq)
 
 
 if __name__ == "__main__":

@@ -380,3 +380,32 @@ def test_breakout_vol_sizing_uses_prior_closes_and_the_cap(tmp_path):
     nb3 = NoiseBand("QQQ", 75_000, tmp_path, paper=False)
     nb3.start_day(hist, None, day, resume=False)
     assert nb3.day_notional == 75_000
+
+
+def test_flatten_keeps_the_trend_sleeve(api):
+    api.bracket("vpa-TSLA-9m-202611271000", "TSLA", "buy", 10, 380.0, 379.0, 381.0)
+    q = api._new(client_order_id="trend-QQQM-20261126", symbol="QQQM", side="buy", qty="200", type="market")
+    api.fill(q, 250.0)
+    moc = api._new(client_order_id="trend-QQQM-20261127", symbol="QQQM", side="sell", qty="200", type="market")
+    LV.Engine.flatten()
+    assert api.pos.get("TSLA", 0) == 0 and api.pos["QQQM"] == 200 and moc["status"] == "new"
+
+
+def test_trend_rule_and_rebalance(api, monkeypatch, tmp_path):
+    from vpa_trading import trend as TR
+    assert TR.inside(pd.Series([100.0] * 199), 101.0)[0] and not TR.inside(pd.Series([100.0] * 199), 99.0)[0]
+    assert not TR.inside(pd.Series([100.0] * 50), 101.0)[0]          # not enough history: stay out
+    monkeypatch.setattr(TR, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(TR.requests, "get", api.get)
+    monkeypatch.setattr(TR.requests, "post", api.post)
+    days = pd.bdate_range("2026-01-01", periods=250)
+    monkeypatch.setattr(TR.LV, "fetch_bars", lambda *a, **k: {"QQQ": pd.DataFrame({"close": 100.0}, index=days)})
+    prices = {"QQQ": 110.0, "QQQM": 250.0}
+    monkeypatch.setattr(TR, "_latest", lambda s: prices[s])
+    now = pd.Timestamp("2026-12-21 15:45")
+    msg = TR.rebalance(50_000, now)
+    assert "IN" in msg and api.pos["QQQM"] == 200 and api.by_cid("trend-QQQM-20261221") is not None
+    assert TR.rebalance(50_000, now) == ""                           # once a day
+    prices["QQQ"] = 90.0
+    msg = TR.rebalance(50_000, now + pd.Timedelta(days=1))
+    assert "OUT" in msg and api.pos.get("QQQM", 0) == 0

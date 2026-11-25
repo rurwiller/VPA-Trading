@@ -19,7 +19,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from vpa_trading import live as LV  # noqa: E402
 
-STRAT = {"vpa-": "Candle scanner", "alert-": "Alert mode", "lvl-": "Banks level", "key-": "Key level", "nb-": "Trend-day breakout"}
+STRAT = {"vpa-": "Candle scanner", "alert-": "Alert mode", "lvl-": "Banks level", "key-": "Key level", "nb-": "Trend-day breakout", "trend-": "QQQ 200-day trend"}
 MST = "America/Denver"
 
 
