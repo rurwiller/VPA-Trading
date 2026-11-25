@@ -26,3 +26,4 @@ logged_utc,study,variant,n,mean,t,unit,note
 2026-11-25 22:01,breakout_sizing,"vol-sized vs fixed, TSLA/QQQ/NVDA",11253,nan,nan,,
 2026-11-25 22:03,daily_trend,4 rules x 3 books,0,nan,nan,,
 2026-11-25 22:03,daily_trend,4 rules x 3 books,0,nan,nan,,
+2026-11-25 22:21,breakout_options,3 option choices x TSLA/QQQ,1344,nan,nan,,
