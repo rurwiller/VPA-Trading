@@ -18,7 +18,8 @@ Three weeks of paper trading and five years of backtests point the same way:
 | Trend-day breakout | TSLA + QQQ | backtest and holdout positive (reports/breakout_symbols.md) |
 | Breakout sizing | by volatility: $1,700 of a typical day's move per trade, at most $150k (`--breakout-vol-budget 1700`) | TSLA + QQQ Sharpe 1.29 -> 1.51, worst day -$3,855 -> -$2,350 (reports/breakout_sizing.md) |
 | Breakout exits | wait for Alpaca to confirm the cancels before exiting | Nov 25 QQQ exit rejected, short left with no stop |
-| Daily loss stop | -$3,000 | fired correctly on Nov 25 |
+| Daily loss stop | -$3,000 (the trend sleeve's daily swing is not counted) | fired correctly on Nov 25 |
+| QQQ 200-day trend sleeve | $50,000 of QQQM held while QQQ closes above its 200-day average; checked 15 min before the close, market-on-close order, kept overnight (`--trend-qqq 50000`); added Nov 25 at the user's request | reports/daily_trend.md |
 
 ## Tested and not adopted
 
@@ -40,7 +41,7 @@ Three weeks of paper trading and five years of backtests point the same way:
 - **The 15-ETF basket with the same rule:** worst drop -12% against -29%, but half the growth.
 - **Correlation with the breakout:** about 0, so the two would not move together.
 - **Recommendation:** a QQQ 200-day sleeve for money you would otherwise just hold. It is mainly a drawdown cutter, not a return booster. QQQ is below its 200-day now, so it would be in cash today.
-- **Not switched on:** it needs your OK to paper-trade it.
+- **Switched on (paper) on Nov 25** at your request; see the table above. It is judged on its own over months, not 60 days: it trades rarely.
 
 ## How it gets judged (fixed now, before the results)
 
