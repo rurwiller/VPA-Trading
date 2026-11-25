@@ -1,4 +1,5 @@
 """The paper-order plumbing against a fake Alpaca: half exits, their recovery, breakout conflicts, flatten, loss stop."""
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -360,3 +361,22 @@ def test_short_cap_allows_longs_adds_and_ignores_the_breakout(api):
     long_ = _plan("META", side=1)
     eng.submit(long_)
     assert "short cap" not in (long_.exit_reason or "")
+
+
+def test_breakout_vol_sizing_uses_prior_closes_and_the_cap(tmp_path):
+    rng = np.random.default_rng(0)
+    days = pd.bdate_range("2026-10-01", periods=30)
+    closes = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, len(days))))
+    idx = [d + pd.Timedelta(hours=15, minutes=59) for d in days]
+    hist = pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes, "volume": 1.0}, index=idx)
+    day = days[-1] + pd.Timedelta(days=1)
+    v = float(np.log(pd.Series(closes)).diff().tail(20).std())
+    nb = NoiseBand("TSLA", 75_000, tmp_path, paper=False, vol_budget=1_000)
+    nb.start_day(hist, None, day, resume=False)
+    assert abs(nb.day_notional - min(1_000 / v, 150_000)) < 1
+    nb2 = NoiseBand("QQQ", 75_000, tmp_path, paper=False, vol_budget=1_000_000)
+    nb2.start_day(hist, None, day, resume=False)
+    assert nb2.day_notional == 150_000
+    nb3 = NoiseBand("QQQ", 75_000, tmp_path, paper=False)
+    nb3.start_day(hist, None, day, resume=False)
+    assert nb3.day_notional == 75_000

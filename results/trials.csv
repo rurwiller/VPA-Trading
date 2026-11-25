@@ -23,3 +23,4 @@ logged_utc,study,variant,n,mean,t,unit,note
 2026-11-21 23:55,breakout_symbols,TSLA,1124,6.7024,2.11,bps/day,
 2026-11-21 23:58,rs_test,9 RS filters x long/short (discovery),25973,nan,nan,,
 2026-11-21 23:58,events_test,5 day types x 4 columns,29441,nan,nan,,
+2026-11-25 22:01,breakout_sizing,"vol-sized vs fixed, TSLA/QQQ/NVDA",11253,nan,nan,,

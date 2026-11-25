@@ -70,8 +70,13 @@ def sigma_curve(hist: pd.DataFrame, day: pd.Timestamp, lookback: int = 14) -> pd
 
 class NoiseBand:
     def __init__(self, sym: str, notional: float, log_dir: Path, paper: bool, exit_opposite: bool = True, exit_rvol: float = 3.0,
-                 osc_trim: tuple | None = (80.0, 0.5), close_min: int = 390):
+                 osc_trim: tuple | None = (80.0, 0.5), close_min: int = 390, vol_budget: float = 0.0,
+                 max_notional: float = 150_000.0):
         self.sym, self.notional, self.log_dir, self.paper = sym, notional, log_dir, paper
+        # vol_budget > 0: size each trade so a typical day's move (20-day realized daily volatility, from closes before
+        # today) is worth vol_budget dollars: notional = vol_budget / vol, capped at max_notional. 0 = fixed notional.
+        # Tested in scripts/breakout_sizing.py (TSLA + QQQ: Sharpe 1.29 -> 1.51, worst day -3,855 -> -2,350).
+        self.vol_budget, self.max_notional, self.day_notional = vol_budget, max_notional, notional
         self.close_min = close_min                # minutes from 9:30 to the close (210 on a half day): no checks in the last 30
         self.exit_opposite, self.exit_rvol = exit_opposite, exit_rvol
         self.osc_trim = osc_trim                  # (level, fraction of the original size) or None
@@ -117,6 +122,13 @@ class NoiseBand:
         prev = hist[hist.index.normalize() < day]
         prev = prev[prev.index.time < pd.Timestamp("16:00").time()]
         self.prev_close = float(prev.close.iat[-1]) if len(prev) else np.nan
+        self.day_notional = self.notional
+        if self.vol_budget > 0 and len(prev):
+            closes = prev.groupby(prev.index.normalize()).close.last()
+            v = float(np.log(closes).diff().tail(20).std())
+            if v == v and v > 0 and len(closes) >= 15:
+                self.day_notional = min(self.vol_budget / v, self.max_notional)
+            self._log("sizing", time=day, daily_vol=f"{v:.2%}" if v == v else "n/a", notional=round(self.day_notional))
         p = self._state_path()
         if p.exists() and resume:
             s = json.loads(p.read_text())
@@ -481,7 +493,7 @@ class NoiseBand:
             self.orig_qty, self.taken_levels, self.breakeven = 0, 0, False
             self.osc_armed, self.osc_trimmed = False, False
         if want != 0:
-            qty = int(self.notional // px)
+            qty = int(self.day_notional // px)
             if self.paper:
                 fill, q = self._wait_fill(self._order("buy" if want > 0 else "sell", qty, "entry"))
                 if not q:

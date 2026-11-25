@@ -191,6 +191,7 @@ class Config:
     add_risk_usd: float = 0.0       # risk of an add in dollars; 0 = the same as risk_usd
     half_at: float = 0.5            # take half off at this many R, then the rest goes to breakeven; 0 = all at the target
     close_min: int = 390            # minutes from 9:30 to today's close (210 on a half day); see close_minute()
+    candles: bool = True            # False: no candle-scanner trades at all (breakout only); user's choice 2026-11-25
     max_shorts: int = 0             # most stocks the candle scanner / alert mode may be short at once, pending entries
                                     # included (0 = no cap). Adds to a stock already short do not count again.
     short_trend_filter: bool = False   # off: it blocks pivot-high shorts at the top of up-moves (user's choice 2026-11-04)  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21

@@ -134,7 +134,8 @@ def tag_gex(p: LV.Plan, levels: dict, m: pd.DataFrame) -> None:
              "flip": lv["flip"], "net_gex_musd": lv["net_gex_musd"], "spot": lv["spot"], "asof": lv["time"]}
 
 
-def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True, osc_trim: tuple | None = (80.0, 0.5)) -> None:
+def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True, osc_trim: tuple | None = (80.0, 0.5),
+           vol_budget: float = 0.0) -> None:
     d = pd.Timestamp(day)
     cfg.close_min = LV.close_minute(d)
     syms = sorted(set(cfg.symbols) | set(breakout))
@@ -142,7 +143,8 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
     hist = LV.fetch_bars(syms, d - pd.Timedelta(days=45), end, feed="sip")   # free plan: no SIP from the last 15 min
     daily = LV.fetch_bars(cfg.symbols, d - pd.Timedelta(days=500), d, tf="1Day", feed="sip")
     for sym in breakout:
-        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit, osc_trim=osc_trim, close_min=cfg.close_min)
+        nb = NoiseBand(sym, notional, Path("logs/replay"), paper=False, exit_opposite=breakout_exit, osc_trim=osc_trim, close_min=cfg.close_min,
+                       vol_budget=vol_budget)
         nb.start_day(hist[sym], None, d, resume=False)
         today = hist[sym][(hist[sym].index.normalize() == d) & (hist[sym].index.time < pd.Timestamp("16:00").time())]
         for t in today.index:
@@ -163,7 +165,7 @@ def replay(cfg: LV.Config, day: str, breakout: list[str], notional: float, alert
             if aeng:
                 aeng.manage_sim(sym, bar, t)
             now = t + pd.Timedelta(minutes=1)
-            for p in eng.signals(sym, m[m.index < now], now):
+            for p in (eng.signals(sym, m[m.index < now], now) if cfg.candles else []):
                 eng.plans.append(p)
                 announce(p)
             if alert:
@@ -227,7 +229,7 @@ def log_buying_power(boundary: pd.Timestamp) -> None:
 
 
 def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, alert_risk: float = 0.0, breakout_exit: bool = True,
-         osc_trim: tuple | None = (80.0, 0.5), max_daily_loss: float = 0.0) -> None:
+         osc_trim: tuple | None = (80.0, 0.5), max_daily_loss: float = 0.0, vol_budget: float = 0.0) -> None:
     clock = requests.get(LV.TRADE + "/clock", headers=LV.headers(), timeout=30).json()
     if not clock.get("is_open"):
         print(f"Market closed. Next open: {clock.get('next_open')}")
@@ -256,10 +258,11 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
               f"${alert_risk:,.0f} risk per trade", flush=True)
     nbs = []
     for sym in breakout:
-        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit, osc_trim=osc_trim, close_min=cfg.close_min)
+        nb = NoiseBand(sym, notional, cfg.log_dir, paper, exit_opposite=breakout_exit, osc_trim=osc_trim, close_min=cfg.close_min,
+                       vol_budget=vol_budget)
         nb.start_day(hist[sym], None, now.normalize())
         nbs.append(nb)
-        print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
+        print(f"Trend-day breakout on {sym}: ${nb.day_notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
     if cfg.max_shorts:
         print(f"Short cap: the candle scanner and alert mode are short at most {cfg.max_shorts} stocks at once", flush=True)
     if max_daily_loss:
@@ -274,7 +277,11 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
     st["sheet"] = eng.key_sheet = KL.load_sheet(now)     # tags every signal; 2x-volume candles at a 7+ zone trade ("key-")
     print("Key levels sheet: " + (f"{len(st['sheet'])} levels for {st['sheet'].sym.nunique()} tickers" if st["sheet"] is not None
                                   else "not made today (run scripts/key_levels.py); signals get no key-zone tag"), flush=True)
-    print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
+    if cfg.candles:
+        print(f"Watching {', '.join(cfg.symbols)} on {', '.join(cfg.tfs)} ({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
+    else:
+        print(f"Watching (breakout only, candle trades and alerts off) {', '.join(breakout) or 'nothing'} "
+              f"({'PAPER ORDERS' if paper else 'alerts only'})", flush=True)
     fails = 0
     while True:
         now = pd.Timestamp.now(tz="America/New_York").tz_localize(None)
@@ -378,7 +385,7 @@ def symbol_step(cfg, paper, boundary, sym, hist, today, eng, aeng, alert, ts, po
                           f"{f'{px:.2f}' if px else ''} {p.exit_reason}", flush=True)
     if not len(m) or (boundary - m.index[-1]) > pd.Timedelta(minutes=3):
         return                               # no fresh bars for this symbol (feed stalled): no new signals on old data
-    for p in eng.signals(sym, m, boundary):
+    for p in (eng.signals(sym, m, boundary) if cfg.candles else []):
         eng.plans.append(p)
         tag_gex(p, gex_levels, m)
         if ts.tag(p.sym):
@@ -433,6 +440,10 @@ def main() -> None:
     ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
     ap.add_argument("--half-at", type=float, default=0.5, help="candle and alert trades: take half off at this many R, then breakeven (0 = off)")
     ap.add_argument("--no-breakout-trim", action="store_true", help="breakout: no 15m oscillator trim (half when it crosses 80/20 against)")
+    ap.add_argument("--no-candles", action="store_true", help="no candle-scanner trades (the trend-day breakout only); "
+                    "use with --alert-risk 0 to turn the candle alerts off too")
+    ap.add_argument("--breakout-vol-budget", type=float, default=0.0, help="breakout: size each trade so a typical day's "
+                    "move is worth this many dollars (notional = budget / 20-day daily volatility, max $150k); 0 = fixed --breakout-notional")
     ap.add_argument("--max-shorts", type=int, default=0, help="most stocks the candle scanner / alert mode may be short at once (0 = no cap)")
     ap.add_argument("--max-daily-loss", type=float, default=0.0, help="close everything and stop for the day once the account is down this many dollars (0 = off)")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
@@ -441,15 +452,15 @@ def main() -> None:
     a = ap.parse_args()
     cfg = LV.Config(symbols=[s.upper() for s in a.symbols], tfs=tuple(a.tfs), families=tuple(a.families),
                     risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap, short_trend_filter=a.trend_filter,
-                    max_adds=a.max_adds, add_risk_usd=a.add_risk, half_at=a.half_at, max_shorts=a.max_shorts)
+                    max_adds=a.max_adds, add_risk_usd=a.add_risk, half_at=a.half_at, max_shorts=a.max_shorts, candles=not a.no_candles)
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:
         replay(cfg, a.replay, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit,
-               None if a.no_breakout_trim else (80.0, 0.5))
+               None if a.no_breakout_trim else (80.0, 0.5), a.breakout_vol_budget)
     else:
         live(cfg, a.paper, [x.upper() for x in a.breakout], a.breakout_notional, a.alert_risk, not a.no_breakout_exit,
-             None if a.no_breakout_trim else (80.0, 0.5), a.max_daily_loss)
+             None if a.no_breakout_trim else (80.0, 0.5), a.max_daily_loss, a.breakout_vol_budget)
 
 
 if __name__ == "__main__":
