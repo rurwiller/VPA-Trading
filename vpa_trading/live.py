@@ -191,6 +191,8 @@ class Config:
     add_risk_usd: float = 0.0       # risk of an add in dollars; 0 = the same as risk_usd
     half_at: float = 0.5            # take half off at this many R, then the rest goes to breakeven; 0 = all at the target
     close_min: int = 390            # minutes from 9:30 to today's close (210 on a half day); see close_minute()
+    max_shorts: int = 0             # most stocks the candle scanner / alert mode may be short at once, pending entries
+                                    # included (0 = no cap). Adds to a stock already short do not count again.
     short_trend_filter: bool = False   # off: it blocks pivot-high shorts at the top of up-moves (user's choice 2026-11-04)  # shorts only when price is below session VWAP and the 5m EMA9 is below EMA21
     log_dir: Path = Path("logs/live")
 
@@ -485,7 +487,26 @@ class Engine:
         p.status, p.exit, p.exit_time, p.exit_reason = "closed", float(px), t, why
 
     # ---------------------------------------------------------------- paper orders (live)
+    @classmethod
+    def short_names(cls) -> set:
+        """Stocks the candle strategies are short now or have a short entry waiting for (the breakout's shares excluded)."""
+        names = set()
+        for x in requests.get(TRADE + "/positions", headers=headers(), timeout=30).json():
+            if int(float(x["qty"])) - cls.nb_net.get(x["symbol"], 0) < 0:
+                names.add(x["symbol"])
+        for o in requests.get(TRADE + "/orders", headers=headers(), params={"status": "open"}, timeout=30).json():
+            cid = o["client_order_id"]
+            if o["side"] == "sell" and cid.startswith(("vpa-", "alert-", "lvl-", "key-")) and not cid.endswith(PART) \
+                    and o.get("order_class") != "oco" and o.get("filled_qty") in (None, "0"):
+                names.add(o["symbol"])
+        return names
+
     def submit(self, p: Plan) -> None:
+        if p.side < 0 and self.cfg.max_shorts > 0:
+            held = self.short_names()
+            if p.sym not in held and len(held) >= self.cfg.max_shorts:
+                p.status, p.exit_reason = "cancelled", f"short cap: already short {len(held)} stocks ({', '.join(sorted(held))})"
+                return
         body = {"symbol": p.sym, "qty": str(p.qty), "side": "buy" if p.side > 0 else "sell", "type": "stop",
                 "stop_price": f"{p.entry:.2f}", "time_in_force": "day", "order_class": "bracket",
                 "take_profit": {"limit_price": f"{p.target:.2f}"}, "stop_loss": {"stop_price": f"{p.stop:.2f}"},

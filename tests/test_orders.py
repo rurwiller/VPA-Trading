@@ -292,3 +292,71 @@ def test_restart_still_cancels_entries_past_their_window_and_market_ids(api):
     odd = _resting_entry(api, "vpa-MSFT-9m-202611231000-mkt", sym="MSFT")
     assert LV.Engine.cancel_stale_entries(pd.Timestamp("2026-11-23 10:05")) == 2
     assert late["status"] == odd["status"] == "canceled" and not LV.Engine.adopted
+
+
+def test_breakout_exit_waits_for_its_protection_cancels_to_land(api, tmp_path, monkeypatch):
+    """Nov 25: cancels of the breakout's stop / profit orders landed slowly, the exit was sent while the shares were still
+    held for those orders and Alpaca rejected it, leaving the position with no stop. The exit must wait for the cancels."""
+    mine = api._new(client_order_id="nb-TSLA-entry-1", symbol="TSLA", side="sell", qty="100", type="market")
+    api.fill(mine, 99.0)
+    stop = api._new(client_order_id="nb-TSLA-stop3-1", symbol="TSLA", side="buy", qty="100", type="stop", stop_price="101.5")
+    pending, polls = [], {"n": 0}
+    real_delete, real_get, real_post = api.delete, api.get, api.post
+
+    def slow_delete(url, **kw):                      # the cancel is accepted but lands a few polls later
+        if "/orders/" in url:
+            pending.append(url)
+            return __import__("fake_alpaca").Resp({})
+        return real_delete(url, **kw)
+
+    def get(url, **kw):
+        if url.endswith("/orders") and pending:
+            polls["n"] += 1
+            if polls["n"] >= 3:
+                for u in pending:
+                    real_delete(u)
+                pending.clear()
+        return real_get(url, **kw)
+
+    def post(url, json=None, **kw):
+        if (json or {}).get("client_order_id", "").startswith("nb-TSLA-exit"):
+            assert stop["status"] == "canceled", "exit sent while the stop still held the shares"
+        return real_post(url, json=json, **kw)
+    for name, fn in (("delete", slow_delete), ("get", get), ("post", post)):
+        monkeypatch.setattr(NBM.requests, name, fn)
+    monkeypatch.setattr(NBM.time if hasattr(NBM, "time") else __import__("time"), "sleep", lambda s: None)
+    nb, up, t = nb_at_check(tmp_path, -1)
+    nb._trade(0, 101.0, t)
+    assert nb.pos == 0 and api.pos["TSLA"] == 0
+
+
+def _plan(sym, side=-1):
+    t = pd.Timestamp("2026-11-25 11:00")
+    return LV.Plan(sym, "9m", "premier", "PIVOT_WICK_TOP", side, t, 100.0, 101.0 if side < 0 else 99.0,
+                   99.0 if side < 0 else 101.0, 100.9, 10, t + pd.Timedelta(minutes=18), "1h")
+
+
+def test_short_cap_blocks_a_third_short_stock(api):
+    eng = LV.Engine.__new__(LV.Engine)
+    eng.cfg = LV.Config(symbols=["AAPL"], max_shorts=2)
+    api.bracket("vpa-MSFT-9m-202611251100", "MSFT", "sell", 10, 490.0, 492.0, 488.0)      # short MSFT (filled)
+    api._new(client_order_id="vpa-AMZN-9m-202611251100", symbol="AMZN", side="sell", qty="10", type="stop",
+             stop_price="243", order_class="bracket")                                       # short AMZN entry waiting
+    p = _plan("META")
+    eng.submit(p)
+    assert p.status == "cancelled" and "short cap" in p.exit_reason and api.by_cid("vpa-META-9m-202611251100") is None
+
+
+def test_short_cap_allows_longs_adds_and_ignores_the_breakout(api):
+    eng = LV.Engine.__new__(LV.Engine)
+    eng.cfg = LV.Config(symbols=["AAPL"], max_shorts=2)
+    api.bracket("vpa-MSFT-9m-202611251100", "MSFT", "sell", 10, 490.0, 492.0, 488.0)
+    mine = api._new(client_order_id="nb-QQQ-entry-1", symbol="QQQ", side="sell", qty="100", type="market")
+    api.fill(mine, 610.0)
+    LV.Engine.nb_net = {"QQQ": -100}                          # the breakout's short does not count
+    p = _plan("AMZN")
+    eng.submit(p)
+    assert p.status != "cancelled" or "short cap" not in (p.exit_reason or "")
+    long_ = _plan("META", side=1)
+    eng.submit(long_)
+    assert "short cap" not in (long_.exit_reason or "")

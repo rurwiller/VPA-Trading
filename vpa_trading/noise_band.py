@@ -367,8 +367,13 @@ class NoiseBand:
             if o["client_order_id"].startswith("nb-"):
                 requests.delete(TRADE + f"/orders/{o['id']}", headers=headers(), timeout=30)
                 n += 1
-        if n:
-            time.sleep(1.5)
+        # Wait until Alpaca shows the cancels as done: shares stay "held for orders" until then, and an exit sent
+        # earlier is rejected (Nov 25: QQQ exit rejected after a fixed 1.5 s wait, leaving the position with no stop).
+        for _ in range(20 if n else 0):
+            time.sleep(0.5)
+            r = requests.get(TRADE + "/orders", headers=headers(), params={"status": "open", "symbols": self.sym}, timeout=30)
+            if r.ok and not any(o["client_order_id"].startswith("nb-") for o in r.json()):
+                break
         self.guard_id = None
 
     def _protect(self, q: int, side: str, guard: float, tag: str, now: pd.Timestamp) -> None:

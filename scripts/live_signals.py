@@ -260,6 +260,8 @@ def live(cfg: LV.Config, paper: bool, breakout: list[str], notional: float, aler
         nb.start_day(hist[sym], None, now.normalize())
         nbs.append(nb)
         print(f"Trend-day breakout on {sym}: ${notional:,.0f} per trade, checks every 30 min 10:00-15:30 ET", flush=True)
+    if cfg.max_shorts:
+        print(f"Short cap: the candle scanner and alert mode are short at most {cfg.max_shorts} stocks at once", flush=True)
     if max_daily_loss:
         print(f"Daily loss stop: everything is closed and trading ends for the day at -${max_daily_loss:,.0f}", flush=True)
     st = {"gex": {}, "gex_at": None, "boundary": now.floor("min")}
@@ -431,6 +433,7 @@ def main() -> None:
     ap.add_argument("--breakout-notional", type=float, default=100_000.0, help="dollars of stock per breakout trade")
     ap.add_argument("--half-at", type=float, default=0.5, help="candle and alert trades: take half off at this many R, then breakeven (0 = off)")
     ap.add_argument("--no-breakout-trim", action="store_true", help="breakout: no 15m oscillator trim (half when it crosses 80/20 against)")
+    ap.add_argument("--max-shorts", type=int, default=0, help="most stocks the candle scanner / alert mode may be short at once (0 = no cap)")
     ap.add_argument("--max-daily-loss", type=float, default=0.0, help="close everything and stop for the day once the account is down this many dollars (0 = off)")
     ap.add_argument("--paper", action="store_true", help="place Alpaca PAPER bracket orders")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay a past day, no orders")
@@ -438,7 +441,7 @@ def main() -> None:
     a = ap.parse_args()
     cfg = LV.Config(symbols=[s.upper() for s in a.symbols], tfs=tuple(a.tfs), families=tuple(a.families),
                     risk_usd=a.risk, max_notional=a.max_notional, target=a.target, require_gap=not a.no_gap, short_trend_filter=a.trend_filter,
-                    max_adds=a.max_adds, add_risk_usd=a.add_risk, half_at=a.half_at)
+                    max_adds=a.max_adds, add_risk_usd=a.add_risk, half_at=a.half_at, max_shorts=a.max_shorts)
     if a.flatten:
         flatten_and_report(None)
     elif a.replay:
