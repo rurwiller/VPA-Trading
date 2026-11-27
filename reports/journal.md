@@ -89,8 +89,7 @@ before the session) and time of day are added for every position. Rebuilt in ful
 | Group | Trades | Won | P/L | Average R |
 |---|--:|--:|--:|--:|
 | above | 73 | 56% | -127 | -0.06 |
-| below | 32 | 66% | +997 | -0.03 |
-| nan | 10 | 10% | -3,115 | -0.84 |
+| below | 42 | 52% | -2,118 | -0.23 |
 
 ## SPY volatility
 
@@ -98,8 +97,7 @@ before the session) and time of day are added for every position. Rebuilt in ful
 |---|--:|--:|--:|--:|
 | calm | 11 | 55% | -405 | +0.13 |
 | normal | 5 | 20% | +61 | -1.15 |
-| stressed | 89 | 62% | +1,214 | -0.04 |
-| nan | 10 | 10% | -3,115 | -0.84 |
+| stressed | 99 | 57% | -1,901 | -0.13 |
 
 ## Slippage (entry fill vs the planned entry, in R; negative = paid more than planned)
 
